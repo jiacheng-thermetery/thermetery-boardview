@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
-# Copyright (C) 2026 Jiacheng Thermetery
+# Copyright (C) 2026 Thermetery Technology LLC
 
 """
 Unified boardview loader. Picks the right parser by file extension (with
