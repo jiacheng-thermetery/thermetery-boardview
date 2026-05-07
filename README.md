@@ -1,6 +1,6 @@
 # Boardviewer
 
-A pan/zoom viewer for PCB boardview files, with component and net browsing.
+A pan/zoom viewer for PCB boardview files, with component and net browsing. This initial release should have full support for Gigabyte `.tvw` files. 
 
 Loads:
 
