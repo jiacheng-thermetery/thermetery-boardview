@@ -79,4 +79,4 @@ redistribute the viewer as part of larger works. If you modify the
 LGPL'd files themselves, those modifications must be released under
 LGPL-3.0-or-later.
 
-Copyright (C) 2026 Jiacheng Thermetery.
+Copyright (C) 2026 Thermetery Technology LLC.
