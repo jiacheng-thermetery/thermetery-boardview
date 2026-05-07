@@ -70,6 +70,10 @@ Working. Loads tested against:
 - MSI MS-7680 Rev 5.1 (GENCAD)
 - Gigabyte Z490 VISION G, X570 GAMING X, B550 AORUS PRO AC (TVW)
 
+## Known Issues
+
+Freezes when loading traces for Gigabyte GPU `.tvw` files
+
 ## License
 
 LGPL-3.0-or-later. See [LICENSE](LICENSE) for the full text.
