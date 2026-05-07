@@ -1,0 +1,13 @@
+# Boardviewer runs with stdlib + tkinter only.
+#
+# The optional packages below enable faster trace rendering. The viewer
+# auto-detects what's installed and picks the best available renderer:
+#
+#   GPU tier (sub-10ms frames):  pyopengltk + PyOpenGL + skia-python + numpy
+#   CPU tier (~30-50 ms frames): skia-python + numpy
+#   Fallback:                    plain tk.Canvas (slow on dense trace layers)
+
+numpy>=1.24
+skia-python>=87.6
+pyopengltk>=0.0.4
+PyOpenGL>=3.1

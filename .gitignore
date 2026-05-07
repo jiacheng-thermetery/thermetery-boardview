@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Per-board topology caches (generated at runtime from .tvw files)
+*.topocache.pkl
+
+# IDE / editor cruft
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# User config (last-used dir + recent file list)
+.boardviewer.json
+
+# Sample boardview / schematic files — keep the repo lean. Drop a .tvw,
+# .cad, .brd, .brd2, .bv, or .pdf in your working directory and pass it
+# on the command line; don't commit boards into the repo.
+*.tvw
+*.cad
+*.brd
+*.brd2
+*.bv
+*.pdf
