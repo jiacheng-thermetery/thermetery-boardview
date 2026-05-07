@@ -21,6 +21,9 @@ python viewer.py                         # opens a file picker
 python viewer.py path/to/board.tvw       # loads directly
 ```
 
+## Acknowledgements
+I would like to thank the collaborative team effort at OpenBoardView at https://github.com/OpenBoardView/OpenBoardView/issues/291, especiallt the user inflex, for the tremendous pioneering work that he has done in the reverse engineering process. 
+
 ## Controls
 
 - **Mouse drag** — pan
