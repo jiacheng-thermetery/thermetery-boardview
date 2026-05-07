@@ -86,4 +86,8 @@ redistribute the viewer as part of larger works. If you modify the
 LGPL'd files themselves, those modifications must be released under
 LGPL-3.0-or-later.
 
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attribution
+of the upstream projects whose file-format documentation informed the
+parsers in this repository.
+
 Copyright (C) 2026 Thermetery Technology LLC.
