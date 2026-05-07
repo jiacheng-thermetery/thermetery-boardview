@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 Jiacheng Thermetery
+
 """
 Unified boardview loader. Picks the right parser by file extension (with
 content sniffing as a fallback) and returns a common BoardModel.

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 Jiacheng Thermetery
+
 """TVW connectivity graph — board-level trace topology.
 
 Builds a connected-component graph from the geometric primitives the

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 Jiacheng Thermetery
+
 """TVW master footprint table — pin-position decoder and transformer.
 
 A TVW file's tail section contains a "master footprint" table that defines

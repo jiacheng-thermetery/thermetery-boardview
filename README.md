@@ -69,3 +69,14 @@ TVW_FORMAT.md           Working spec for the Teboview binary format
 Working. Loads tested against:
 - MSI MS-7680 Rev 5.1 (GENCAD)
 - Gigabyte Z490 VISION G, X570 GAMING X, B550 AORUS PRO AC (TVW)
+
+## License
+
+LGPL-3.0-or-later. See [LICENSE](LICENSE) for the full text.
+
+You can use this code as a library in proprietary tools and you can
+redistribute the viewer as part of larger works. If you modify the
+LGPL'd files themselves, those modifications must be released under
+LGPL-3.0-or-later.
+
+Copyright (C) 2026 Jiacheng Thermetery.

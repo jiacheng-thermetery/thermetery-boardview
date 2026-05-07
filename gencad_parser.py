@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 Jiacheng Thermetery
+
 """
 Parse a GENCAD 1.4 boardview file into a BoardModel for diagnostic use.
 

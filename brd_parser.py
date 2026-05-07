@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 Jiacheng Thermetery
+
 """
 Parse OpenBoardView ASCII boardview formats — BRD2 (modern) and the
 legacy Allegro-style BRD — into a BoardModel compatible with gencad_parser.

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 Jiacheng Thermetery
+
 """
 Best-effort parser for Teboview / TVW boardview files (Gigabyte/Lenovo etc).
 

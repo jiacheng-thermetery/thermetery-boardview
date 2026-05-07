@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 Jiacheng Thermetery
+
 """Phase 27: Unified scanner v3 with polyline chains support.
 
 A polyline chain is a sequence of polylines [u32 K][K * (X, Y)] separated by
