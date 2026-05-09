@@ -1,6 +1,9 @@
 # `.tvw` Boardviewer
 
-A pan/zoom viewer for PCB boardview files, with component and net browsing. This initial release should have full support for Gigabyte `.tvw` files. 
+A pan/zoom viewer for PCB boardview files, with component and net browsing.
+Multi-layer trace inspection on GPU PCBs (TOP, BOTTOM, INNER_1..N), pin↔net
+mapping for every supported format, cross-layer trace highlight when a net
+is selected.
 
 Loads:
 
@@ -9,6 +12,8 @@ Loads:
 | GENCAD 1.4                 | `.cad`                    | Mentor / Teradyne ASCII        |
 | OpenBoardView ASCII        | `.brd`, `.brd2`, `.bv`    | BRD2 (modern) and legacy BRD   |
 | Teboview (Gigabyte)        | `.tvw`                    | binary; pin↔net + traces       |
+| Allegro Extracta `.fz`     | `.fz`                     | binary; ASRock = zlib-only, ASUS = RC6+zlib (needs an FZKey at `private/fz_key.txt`) |
+| XZZPCB (MSI / repair shops)| `.pcb`                    | binary, DES-encrypted; needs an XZZ key (see THIRD_PARTY_NOTICES.md) |
 
 For the TVW binary format, see [TVW_FORMAT.md](TVW_FORMAT.md) for a working spec
 (file macro layout, coordinate system, master-footprint pin-position decoder,
@@ -22,20 +27,57 @@ python viewer.py path/to/board.tvw       # loads directly
 ```
 
 ## Acknowledgements
-I would like to thank the collaborative team effort at OpenBoardView at https://github.com/OpenBoardView/OpenBoardView/issues/291, especially the user inflex, for the tremendous pioneering work that he has done in the reverse engineering process. 
+
+I would like to thank the collaborative team effort at OpenBoardView at
+https://github.com/OpenBoardView/OpenBoardView/issues/291, especially the
+user inflex, for the tremendous pioneering work that he has done in the
+reverse engineering process. inflex's earlier
+[teboviewformat](https://github.com/inflex/teboviewformat) repository was
+also the starting point for the TVW research that produced
+[TVW_FORMAT.md](TVW_FORMAT.md).
+
+This viewer also embeds MIT-licensed **code** (not just format
+documentation) from two upstream projects, whose authors deserve credit
+alongside the format work:
+
+- **Chloridite** and the **OpenBoardView contributors** — `xzzpcb_parser.py`
+  is a Python port of `XZZPCBFile.cpp`; the RC6-CFB-1 cipher in
+  `rc6_native.c` and the corresponding pieces of `fz_parser.py` are
+  ports of `FZFile.cpp`.
+- **Dani Huertas** ([dhuertas/DES](https://github.com/dhuertas/DES)) — the
+  DES reference implementation used to decrypt XZZPCB part-records (both
+  the pure-Python fallback in `xzzpcb_parser.py` and the C fast path in
+  `xzz_native.c`).
+
+Full attribution and license terms in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 
 ## Controls
 
 - **Mouse drag** — pan
 - **Mouse wheel** — zoom around the cursor
 - **Home** — reset view (fit-to-window)
-- **L** — flip layer (TOP ↔ BOTTOM, mirrored horizontally)
-- **T** — toggle trace rendering
+- **L** — cycle through available layers. On 2-layer boards (most TVW
+  motherboards, all GENCAD/BRD/XZZ files) this is just TOP↔BOTTOM. On
+  multi-layer boards (GPU PCBs once trace topology is built) it walks
+  through TOP, BOTTOM, INNER_1, INNER_2, ... and wraps. The toolbar
+  **Layer** dropdown does the same thing with direct selection.
+- **T** — toggle trace rendering. First press on a multi-layer board
+  builds the topology (3-6 s) and populates the inner-layer entries
+  in the Layer dropdown. Selecting a net then highlights it across
+  every layer the trace touches (current layer in bright yellow,
+  off-current layers in their layer's palette colour) so you can see
+  the full cross-layer path of the net.
 - **Click an IC** — select; pins render as yellow dots
 - **Click a pin** — focus pin; Net tab fills with everything else on that net
 - **Click a row in Net tab** — jump to that pin (auto-flips layer)
 - **Component / Net search** in toolbar — autocomplete by refdes or net name
 - **View menu** — mirror X, rotate 90° CW/CCW
+
+When viewing an inner copper layer, components (which only exist on TOP/
+BOTTOM in the data model) render as faint outline ghosts so you can still
+see what the trace runs under without losing the layer you're inspecting.
 
 ## Renderer tiers
 
@@ -63,6 +105,36 @@ tvw_parser.py           .tvw parser  → BoardModel
 tvw_master_fp.py        TVW master-footprint pin-position decoder
 tvw_topology.py         TVW trace topology graph (segments + polylines)
 tvw_seg_27_unified_v3.py  TVW polyline / chain block scanner
+tvw_native.{c,dll,py}   optional C-extension fast path for the scanners
+                          (~600× speedup on cold loads; .py shim falls
+                          back to pure Python if the .dll is absent)
+fz_parser.py            .fz parser (Allegro Extracta)  → BoardModel
+                          Hybrid: independent Allegro Extracta record
+                          parser + Python port of FZFile.cpp's RC6-CFB-1
+                          cipher (pure-Python fallback for rc6_native).
+                          File-as-a-whole is LGPL; the RC6 pieces carry
+                          OpenBoardView's MIT notice in the file header.
+                          ASRock files parse without a key; ASUS files
+                          need an FZKey. See THIRD_PARTY_NOTICES.md.
+rc6_native.{c,dll}      optional C fast-path port of FZFile::decode
+                          (RC6-CFB-1 cipher used by ASUS .fz). MIT-
+                          licensed; attribution in THIRD_PARTY_NOTICES.md
+                          and LICENSES/. Pure-Python fallback in
+                          fz_parser.py runs when the .dll is absent
+                          (~150× slower but works).
+xzzpcb_parser.py        .pcb parser (XZZPCB V1.0)  → BoardModel
+                          Python port of OpenBoardView's XZZPCBFile.cpp
+                          and dhuertas/DES; both MIT, attribution in
+                          THIRD_PARTY_NOTICES.md and LICENSES/.
+xzz_native.{c,dll,py}   optional C-extension fast path for the DES
+                          decryption used by xzzpcb_parser (~100× speedup
+                          on cold loads — full board in ~0.3 s vs 30-60 s
+                          in pure Python; .py shim falls back if the .dll
+                          is absent). C port of dhuertas/DES; MIT-
+                          licensed, attribution in THIRD_PARTY_NOTICES.md
+                          and LICENSES/. Decrypted plaintext is never
+                          written to disk: leaving proprietary file
+                          contents in a cache is an IP/leakage hazard.
 viewer.py               Tk app + board canvas (CPU + GL tiers)
 TVW_FORMAT.md           Working spec for the Teboview binary format
 ```
@@ -70,12 +142,20 @@ TVW_FORMAT.md           Working spec for the Teboview binary format
 ## Status
 
 Working. Loads tested against:
-- MSI MS-7680 Rev 5.1 (GENCAD)
+- MSI MS-7680 Rev 5.1, MSI MS-17E7, ASUS ROG Maximus Z690 EXTREME,
+  Dell Alienware Area 51M / 17 R4 (GENCAD)
+- Apple iMac A1311 820-2492-A (BRD)
 - Gigabyte Z490 VISION G, X570 GAMING X, B550 AORUS PRO AC (TVW)
+- Gigabyte GV-N780OC-3GD GPU (TVW, 10-layer — exercises the multi-
+  layer trace cycle and cross-layer highlight)
+- ASRock X370P-RO4, Z390 Pro4, Z97X Killer (FZ, zlib-only path)
+- ASUS PRIME Z370-A, ASUS GTX 1080 Ti STRIX (FZ, also zlib-only —
+  not all ASUS files are RC6-encrypted)
+- MSI V389/7913/7914/7A05/7A06 series, PS5 EDM-010 (XZZPCB)
 
 ## Known Issues
 
-Freezes when loading traces for Gigabyte GPU `.tvw` files
+None currently tracked.
 
 ## License
 
