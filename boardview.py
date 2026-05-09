@@ -12,6 +12,11 @@ Supported today:
                          (components, positions, per-chip pins, and
                          pin↔net mapping via the 38-byte pad records
                          buried in Custom_35/Custom_17 trace blocks)
+  .pcb                 — XZZPCB V1.0 (MSI / Chinese repair shops)  partial
+                         (binary; needs an XZZ DES key at
+                         private/XZZ_Key.txt or env XZZPCB_KEY.
+                         Without a key the outline + test pads +
+                         net list still parse.)
 
 Importers should pull `BoardModel`, `Component`, `Shape` from here so we
 have one consistent surface.
@@ -24,6 +29,8 @@ from gencad_parser import BoardModel, Component, Shape
 from gencad_parser import parse as _parse_gencad
 from brd_parser import parse as _parse_brd
 from tvw_parser import parse as _parse_tvw
+from xzzpcb_parser import parse as _parse_xzzpcb
+from xzzpcb_parser import verify_format as _verify_xzzpcb
 
 PathLike = Union[str, Path]
 
@@ -31,7 +38,8 @@ PathLike = Union[str, Path]
 GENCAD_EXTS = {".cad"}
 BRD_EXTS = {".brd", ".brd2", ".bv"}
 TVW_EXTS = {".tvw"}
-ALL_EXTS = GENCAD_EXTS | BRD_EXTS | TVW_EXTS
+XZZPCB_EXTS = {".pcb"}
+ALL_EXTS = GENCAD_EXTS | BRD_EXTS | TVW_EXTS | XZZPCB_EXTS
 
 
 def parse(path: PathLike) -> BoardModel:
@@ -43,6 +51,8 @@ def parse(path: PathLike) -> BoardModel:
         return _parse_brd(p)
     if ext in TVW_EXTS:
         return _parse_tvw(p)
+    if ext in XZZPCB_EXTS:
+        return _parse_xzzpcb(p)
     return _sniff_and_parse(p)
 
 
@@ -58,6 +68,14 @@ def is_stub_format(path: PathLike) -> bool:
 def _sniff_and_parse(path: Path) -> BoardModel:
     """Look at the first few KB to decide. Useful when the extension is
     unfamiliar but the contents are recognisable."""
+    # Binary formats first — XZZPCB has a stable magic at offset 0
+    # (sometimes XOR-obfuscated, handled by verify_format).
+    try:
+        head_bytes = path.read_bytes()[:0x40]
+    except OSError:
+        head_bytes = b""
+    if head_bytes and _verify_xzzpcb(head_bytes):
+        return _parse_xzzpcb(path)
     head = path.read_text(encoding="utf-8", errors="replace")[:8000]
     if "$COMPONENTS" in head and "$SIGNALS" in head:
         return _parse_gencad(path)

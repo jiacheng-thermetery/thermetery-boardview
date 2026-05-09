@@ -17,6 +17,14 @@ from collections import Counter
 
 
 def find_polyline_blocks(buf, region_start, region_end, max_K=100000):
+    # Native fast path — see tvw_native.c. ~600× speedup on cold loads.
+    try:
+        from tvw_native import find_polyline_blocks as _nat_find_blocks
+        result = _nat_find_blocks(buf, region_start, region_end, max_K=max_K)
+        if result is not None:
+            return result
+    except Exception:
+        pass
     blocks = []
     n = min(region_end, len(buf))
 
@@ -64,6 +72,17 @@ def find_polyline_blocks(buf, region_start, region_end, max_K=100000):
 
 def find_tagged_polylines_in_gap(buf, gap_start, gap_end, term_size=4,
                                   max_net_id=4000, max_vertices=100000):
+    # Native fast path — see tvw_native.c.
+    try:
+        from tvw_native import find_tagged_polylines_in_gap as _nat_find_tagged
+        result = _nat_find_tagged(buf, gap_start, gap_end,
+                                   term_size=term_size,
+                                   max_net_id=max_net_id,
+                                   max_vertices=max_vertices)
+        if result is not None:
+            return result
+    except Exception:
+        pass
     out = []
     i = gap_start
     n = gap_end
@@ -110,6 +129,16 @@ def find_pad_runs_in_gap(buf, gap_start, gap_end, min_run=50):
 
 
 def find_segments_in_gap(buf, gap_start, gap_end, min_run=10, allow_zero_net=True):
+    # Native fast path — see tvw_native.c.
+    try:
+        from tvw_native import find_segments_in_gap as _nat_find_segs
+        result = _nat_find_segs(buf, gap_start, gap_end,
+                                 min_run=min_run,
+                                 allow_zero_net=allow_zero_net)
+        if result is not None:
+            return result
+    except Exception:
+        pass
     n = gap_end
 
     def is_segment(off):
@@ -143,6 +172,15 @@ def find_segments_in_gap(buf, gap_start, gap_end, min_run=10, allow_zero_net=Tru
 
 def find_polyline_chains_in_gap(buf, gap_start, gap_end, min_chain=3, max_K=100000):
     """Find chains of untagged polylines [K][verts] separated by 4 or 12 zeros."""
+    # Native fast path — see tvw_native.c.
+    try:
+        from tvw_native import find_polyline_chains_in_gap as _nat_chains
+        result = _nat_chains(buf, gap_start, gap_end,
+                             min_chain=min_chain, max_K=max_K)
+        if result is not None:
+            return result
+    except Exception:
+        pass
     chains = []
     n = gap_end
 

@@ -9,7 +9,7 @@ BRD2 sections (most common today):
     BRDOUT: <num_format> <max.x> <max.y>
     NETS:   <num_nets>          → <id> <name>
     PARTS:  <num_parts>         → <name> <p1.x> <p1.y> <p2.x> <p2.y>
-                                  <end_of_pins> <side>
+                                  <pin_anchor> <side>
     PINS:   <num_pins>          → <x> <y> <netid> <side>
     NAILS:  <num_nails>         → <probe> <x> <y> <netid> <is_top>
 
@@ -21,9 +21,24 @@ Legacy BRD sections:
     Pins:       <num_pins lines of "x y probe part_id net_name">
     Nails:      <num_nails lines of "probe x y side net_name">
 
-`end_of_pins` is the *exclusive upper bound* of pin indices belonging to
-each part; part i's pins are pins[prev_eop : eop]. Pin names are not
-stored in the file, so we use sequential "1", "2", ... per part.
+The PARTS `pin_anchor` field has TWO conventions in the wild:
+
+  * **end_of_pins** (OpenBoardView reference exporter): exclusive upper
+    bound — part i owns `pins[prev_eop : pin_anchor]`. The last part's
+    `pin_anchor` equals the total pin count.
+
+  * **start_of_pins** (Apple-style dumps, e.g. iMac A1311 820-2492-A):
+    inclusive lower bound — part i owns `pins[pin_anchor :
+    next_part.pin_anchor]`. The first part's `pin_anchor` is 0; the
+    last part's is `n_pins - last_part_pin_count`.
+
+We detect the convention per-file via `_detect_pin_anchor_convention`
+(structural test on the first/last `pin_anchor` value, with a hit-rate
+fallback for ambiguous files). Misclassifying causes pins to render
+spread out across the board with components showing no pin dots.
+
+Pin names are not stored in the file, so we use sequential "1", "2",
+... per part.
 
 Format references: github.com/OpenBoardView/OpenBoardView
 (BRDFile.cpp, BRD2File.cpp).
@@ -87,7 +102,9 @@ def _parse_brd2(text: str) -> BoardModel:
             except ValueError:
                 pass
 
-    # ---- PARTS: name p1.x p1.y p2.x p2.y end_of_pins side ----
+    # ---- PARTS: name p1.x p1.y p2.x p2.y pin_anchor side ----
+    # pin_anchor is the file-format-dependent integer that links each part
+    # to its run of pins; see module docstring for the two conventions.
     parts_info: List[
         Tuple[str, float, float, str, int, Tuple[float, float], Tuple[float, float]]
     ] = []
@@ -99,7 +116,7 @@ def _parse_brd2(text: str) -> BoardModel:
             refdes = toks[0]
             p1x, p1y = float(toks[1]), float(toks[2])
             p2x, p2y = float(toks[3]), float(toks[4])
-            eop = int(toks[5])
+            pin_anchor = int(toks[5])
             side = int(toks[6])
         except ValueError:
             continue
@@ -107,7 +124,7 @@ def _parse_brd2(text: str) -> BoardModel:
         cy = (p1y + p2y) / 2.0
         layer = {1: "TOP", 2: "BOTTOM"}.get(side, "TOP")
         parts_info.append(
-            (refdes, cx, cy, layer, eop, (p1x, p1y), (p2x, p2y))
+            (refdes, cx, cy, layer, pin_anchor, (p1x, p1y), (p2x, p2y))
         )
 
     # ---- PINS: x y netid [side] ----
@@ -123,12 +140,27 @@ def _parse_brd2(text: str) -> BoardModel:
         except ValueError:
             pass
 
+    # Decide whether `pin_anchor` is start_of_pins or end_of_pins for
+    # this file. See module docstring for the two conventions.
+    convention = _detect_pin_anchor_convention(parts_info, pins_all)
+
     # ---- Compose components & shapes ----
+    n_pins = len(pins_all)
     prev_eop = 0
-    for refdes, cx, cy, layer, eop, p1, p2 in parts_info:
-        eop_clamped = min(eop, len(pins_all))
-        my_pins = pins_all[prev_eop:eop_clamped]
-        prev_eop = eop_clamped
+    for i, (refdes, cx, cy, layer, anchor, p1, p2) in enumerate(parts_info):
+        if convention == "start":
+            # Pin slice = [anchor_i, anchor_{i+1}); last part runs to EOF.
+            s = min(anchor, n_pins)
+            if i + 1 < len(parts_info):
+                e = min(parts_info[i + 1][4], n_pins)
+            else:
+                e = n_pins
+            my_pins = pins_all[s:e] if e >= s else []
+        else:
+            # Pin slice = [prev_eop, anchor); first part starts at 0.
+            eop_clamped = min(anchor, n_pins)
+            my_pins = pins_all[prev_eop:eop_clamped]
+            prev_eop = eop_clamped
 
         shape_name = f"_brd_{refdes}"
         shape = Shape(name=shape_name)
@@ -151,6 +183,70 @@ def _parse_brd2(text: str) -> BoardModel:
         model.components[refdes] = comp
 
     return model
+
+
+def _detect_pin_anchor_convention(
+    parts_info: List[Tuple], pins_all: List[Tuple[float, float, int]],
+) -> str:
+    """Decide whether PARTS field 6 means start_of_pins or end_of_pins.
+
+    Detection strategy in order of preference:
+
+      1. **Structural** — the cheapest, most authoritative signal:
+         - Last part's `pin_anchor` == total pin count -> "end". The
+           exclusive upper bound of the last part is exactly len(pins).
+         - First part's `pin_anchor` == 0 AND last part's < n_pins ->
+           "start". First part starts at index 0; last part starts
+           somewhere before EOF.
+
+      2. **Hit-rate fallback** — for ambiguous files (e.g. truncated or
+         empty sections), score each interpretation by how many pins
+         end up inside their assigned part's bounding box. The
+         interpretation with materially more in-bbox hits wins. Files
+         with a near-tie default to "end" (matches the OpenBoardView
+         reference exporter).
+
+    Returns "start" or "end".
+    """
+    if not parts_info:
+        return "end"
+    n_pins = len(pins_all)
+    first_anchor = parts_info[0][4]
+    last_anchor = parts_info[-1][4]
+    # Structural rule: equality with n_pins is unambiguous.
+    if last_anchor == n_pins:
+        return "end"
+    if first_anchor == 0 and 0 < last_anchor < n_pins:
+        return "start"
+
+    # Ambiguous — score both by how often the assigned pins land inside
+    # the owning part's bbox (with a small margin for pins at the edge).
+    def hit_count(convention: str) -> int:
+        n_hit = 0
+        prev = 0
+        for i, (_refdes, cx, cy, _layer, anchor, p1, p2) in enumerate(parts_info):
+            if convention == "start":
+                s = min(anchor, n_pins)
+                e = min(parts_info[i + 1][4], n_pins) if i + 1 < len(parts_info) else n_pins
+                if e < s:
+                    continue
+                slc = pins_all[s:e]
+            else:
+                e = min(anchor, n_pins)
+                slc = pins_all[prev:e]
+                prev = e
+            bx_min = min(p1[0], p2[0]) - 5.0
+            bx_max = max(p1[0], p2[0]) + 5.0
+            by_min = min(p1[1], p2[1]) - 5.0
+            by_max = max(p1[1], p2[1]) + 5.0
+            for px, py, _net in slc:
+                if bx_min <= px <= bx_max and by_min <= py <= by_max:
+                    n_hit += 1
+        return n_hit
+
+    hit_start = hit_count("start")
+    hit_end = hit_count("end")
+    return "start" if hit_start > hit_end else "end"
 
 
 # --------------------------------------------------------------------------

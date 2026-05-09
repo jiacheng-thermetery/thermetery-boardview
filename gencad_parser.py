@@ -9,24 +9,33 @@ Captures:
   $SIGNALS     -> netlist (net name -> [(refdes, pin), ...])
   $SHAPES      -> footprint definitions (pin offsets relative to component
                   origin) — used to render components at their actual size.
+  $TRACKS      -> track-id → physical width table (referenced from $ROUTES)
+  $ROUTES      -> per-net trace polylines (LINE primitives, layer-tagged) —
+                  used to build a TraceGraph for the trace renderer.
 
-Skips $HEADER, $BOARD, $PADS, $PADSTACKS, $DEVICES, $TRACKS, $LAYERS,
-$ROUTES, $MECH, $TESTPINS, $POWERPINS — not needed for navigation.
+Skips $HEADER, $BOARD, $PADS, $PADSTACKS, $DEVICES, $LAYERS, $MECH,
+$TESTPINS, $POWERPINS — not needed for the viewer.
 
 In addition to the GENCAD parser proper, this module hosts the common
 `BoardModel` dataclass shared by every parser (BRD, GENCAD, TVW).
 BoardModel optionally carries a *trace topology* — a `TraceGraph` from
 `tvw_topology` — produced lazily on first access via the
-`_topology_loader` callable. Parsers that have full geometry (currently
-just TVW) attach a loader; parsers that don't (BRD, GENCAD) leave it
-None and `topology_available` reads False, so GUI code can
-short-circuit cleanly. Topology build is 3-6 s per board, so loading
-must stay lazy.
+`_topology_loader` callable. GENCAD files with a populated $ROUTES
+section get a loader; files without (or BRD/empty TVW) leave it None
+and `topology_available` reads False, so GUI code can short-circuit
+cleanly. Topology build is 3-6 s per board, so loading must stay lazy.
 """
 
+from collections import namedtuple
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+# Lightweight pad view used by `find_broken_nets` when iterating the
+# numpy-array path. Tuple construction is ~3× faster than the slotted
+# `Pad` dataclass — we only need a handful of attributes here, never
+# all of Pad's fields, and these instances never leave this function.
+_PadView = namedtuple("_PadView", "pad_id x y net_id layer")
 
 
 # Re-export topology record types so callers don't need a second import.
@@ -304,21 +313,65 @@ class BoardModel:
         # each pad's UF root, and tally distinct nets per root so we can
         # spot conflict (multi-net) components in O(P) rather than
         # repeating the work per net.
+        #
+        # We iterate the canonical numpy arrays when available (TVW
+        # boards built via the array-direct path), avoiding the cost of
+        # materialising 100K Pad dataclass instances. Falls back to the
+        # legacy `graph.pads` list for any source that didn't populate
+        # `_pad_arrays` (cache-loaded graphs, GENCAD topology builders).
         pads_by_net: Dict[int, List] = {}
         pad_root: Dict[int, int] = {}  # pad_id -> UF root
         root_nets: Dict[int, set] = {}
-        for pad in graph.pads:
-            node = graph._pad_node.get(pad.pad_id, -1)
-            if node < 0:
-                continue
-            root = graph._uf.find(node)
-            node_net = graph._node_net[node]
-            net_for_pad = pad.net_id if pad.net_id else node_net
-            if not net_for_pad:
-                continue
-            pads_by_net.setdefault(net_for_pad, []).append(pad)
-            pad_root[pad.pad_id] = root
-            root_nets.setdefault(root, set()).add(net_for_pad)
+        pad_arrays = getattr(graph, "_pad_arrays", None)
+        if pad_arrays:
+            x_arr = pad_arrays["x"].tolist()
+            y_arr = pad_arrays["y"].tolist()
+            net_arr = pad_arrays["net_id"].tolist()
+            pid_arr = pad_arrays["pad_id"].tolist()
+            layer_arr = pad_arrays["layer"].tolist()
+            # N-layer aware: the topology graph carries its own layer-name
+            # table. For 2-layer mobos this is ("TOP", "BOTTOM"); for GPU
+            # PCBs it's ("TOP", "BOTTOM", "INNER_1", ...). Fall back to a
+            # 2-entry tuple if the graph predates the field (e.g. a v8
+            # cache that survived a version skew).
+            layer_str = getattr(graph, "_layer_names", None) \
+                or ("TOP", "BOTTOM")
+            pad_node_get = graph._pad_node.get
+            uf_find = graph._uf.find
+            node_nets = graph._node_net
+            n = len(x_arr)
+            for i in range(n):
+                pad_id = pid_arr[i]
+                node = pad_node_get(pad_id, -1)
+                if node < 0:
+                    continue
+                root = uf_find(node)
+                pad_net = net_arr[i]
+                node_net = node_nets[node]
+                net_for_pad = pad_net if pad_net else node_net
+                if not net_for_pad:
+                    continue
+                # Store a tiny tuple instead of a dataclass — the
+                # caller (this function) only needs (pad_id, x, y,
+                # layer, net_id) to populate the BrokenNet.
+                pad_entry = _PadView(pad_id, x_arr[i], y_arr[i],
+                                      pad_net, layer_str[layer_arr[i]])
+                pads_by_net.setdefault(net_for_pad, []).append(pad_entry)
+                pad_root[pad_id] = root
+                root_nets.setdefault(root, set()).add(net_for_pad)
+        else:
+            for pad in graph.pads:
+                node = graph._pad_node.get(pad.pad_id, -1)
+                if node < 0:
+                    continue
+                root = graph._uf.find(node)
+                node_net = graph._node_net[node]
+                net_for_pad = pad.net_id if pad.net_id else node_net
+                if not net_for_pad:
+                    continue
+                pads_by_net.setdefault(net_for_pad, []).append(pad)
+                pad_root[pad.pad_id] = root
+                root_nets.setdefault(root, set()).add(net_for_pad)
 
         out: List[BrokenNet] = []
         # Iterate over self.signals — that's the canonical net list with
@@ -418,6 +471,28 @@ def parse(path: Path) -> BoardModel:
     current_signal: str | None = None
     current_shape: Shape | None = None
 
+    # $TRACKS and $ROUTES storage. We accumulate raw line tuples here and
+    # only construct the TraceGraph if and when the GUI actually accesses
+    # `model.topology` — see `_make_topology_loader` below.
+    tracks_widths: Dict[int, float] = {}
+    # routes: list of (net_name, track_id, layer, [(x1,y1,x2,y2), ...])
+    routes: List[Tuple[str, int, str, List[Tuple[float, float, float, float]]]] = []
+    current_route_net: Optional[str] = None
+    current_route_track: int = 0
+    current_route_layer: str = "TOP"
+    current_route_lines: List[Tuple[float, float, float, float]] = []
+
+    def _flush_route_segment():
+        # Emit the currently accumulating (net, track, layer, lines) as a
+        # route segment if it has any lines.
+        nonlocal current_route_lines
+        if current_route_net and current_route_lines:
+            routes.append((
+                current_route_net, current_route_track,
+                current_route_layer, current_route_lines,
+            ))
+        current_route_lines = []
+
     def _flush_component():
         nonlocal current_component
         if current_component is not None and current_component.refdes:
@@ -439,13 +514,17 @@ def parse(path: Path) -> BoardModel:
         if line.startswith("$END"):
             _flush_component()
             _flush_shape()
+            _flush_route_segment()
             current_signal = None
+            current_route_net = None
             section = None
             continue
         if line.startswith("$"):
             _flush_component()
             _flush_shape()
+            _flush_route_segment()
             current_signal = None
+            current_route_net = None
             section = line[1:].strip()
             continue
 
@@ -512,9 +591,256 @@ def parse(path: Path) -> BoardModel:
                 except (ValueError, IndexError):
                     pass
 
+        elif section == "TRACKS":
+            # Format: TRACK <id> <width-in-user-units>
+            tokens = line.split()
+            if len(tokens) >= 3 and tokens[0] == "TRACK":
+                try:
+                    tracks_widths[int(tokens[1])] = float(tokens[2])
+                except (ValueError, IndexError):
+                    pass
+
+        elif section == "ROUTES":
+            # Format:
+            #   ROUTE <net_name>
+            #   [VIA <padstack> <x> <y> ALL <num> <id>]*
+            #   [TRACK <track_id>
+            #    [LAYER <name>
+            #     [LINE <x1> <y1> <x2> <y2>]*
+            #    ]*
+            #   ]*
+            tokens = line.split()
+            if not tokens:
+                continue
+            kw = tokens[0]
+            if kw == "ROUTE":
+                # Net name is everything after the keyword (may contain
+                # punctuation but typically no whitespace).
+                _flush_route_segment()
+                current_route_net = line[len("ROUTE"):].strip()
+                current_route_track = 0
+                current_route_layer = "TOP"
+            elif kw == "TRACK" and len(tokens) >= 2:
+                _flush_route_segment()
+                try:
+                    current_route_track = int(tokens[1])
+                except ValueError:
+                    pass
+            elif kw == "LAYER" and len(tokens) >= 2:
+                _flush_route_segment()
+                current_route_layer = tokens[1]
+            elif kw == "LINE" and len(tokens) >= 5 and current_route_net:
+                try:
+                    x1 = float(tokens[1])
+                    y1 = float(tokens[2])
+                    x2 = float(tokens[3])
+                    y2 = float(tokens[4])
+                    current_route_lines.append((x1, y1, x2, y2))
+                except (ValueError, IndexError):
+                    pass
+            # VIA / ARC / other directives are ignored for now — we only
+            # need straight LINE primitives to render trace overlays.
+
     _flush_component()
     _flush_shape()
+    _flush_route_segment()
+
+    # Normalise "flattened" encoding before anything downstream sees the
+    # model. Some GENCAD exports (notably ASUS X870E-class) bake the
+    # placement into the shape definition: every COMPONENT has PLACE 0 0,
+    # and the matching SHAPE's pin coordinates are absolute board coords.
+    # Unflattened, all components stack at the origin and nothing renders.
+    # See `_normalize_flattened_components` for the detection rule.
+    _normalize_flattened_components(model)
+
+    # Lazily attach a topology loader if there's any route data. The
+    # heavy work (TraceGraph build) happens on first `model.topology`
+    # access; the parser stays fast.
+    if routes:
+        model._topology_loader = _make_gencad_topology_loader(
+            model, tracks_widths, routes,
+        )
     return model
+
+
+def _normalize_flattened_components(model: "BoardModel") -> int:
+    """Detect and rewrite components encoded with "flattened" placement.
+
+    Some GENCAD 1.4 exporters bake each component's world placement into
+    its shape definition rather than emitting it via `PLACE`. The marker:
+    every COMPONENT has `PLACE 0 0`, every component has its own unique
+    SHAPE, and the SHAPE's pins carry absolute board coordinates. Loaded
+    naively, the result is 6,000+ components stacked at the origin —
+    nothing renders.
+
+    Per-component detection. We rewrite a (component, shape) pair when
+    ALL of these hold:
+
+      (a) component.x and component.y are both zero (within 1e-6),
+      (b) the shape is referenced by exactly one component, AND
+      (c) the shape's pin centroid is far from origin (>= 100 file units,
+          which is 2.54 mm in mils or 0.025 mm in centi-mils — well
+          beyond any plausible relative-coords footprint).
+
+    The rewrite moves the centroid into `component.x` / `component.y`
+    and subtracts the centroid from each pin so the shape ends up in
+    the standard component-relative form. After this pass, downstream
+    code (renderer / topology / measurement tool) sees a model that
+    looks identical to a normally-encoded GENCAD file.
+
+    Per-component instead of file-wide so mixed encodings (some flat,
+    some normal) parse correctly. Returns the count of rewritten pairs.
+    """
+    from collections import Counter
+    if not model.components or not model.shapes:
+        return 0
+    shape_refcount: Counter = Counter(
+        c.shape for c in model.components.values() if c.shape
+    )
+    NEAR_ZERO = 1e-6
+    FAR_FROM_ORIGIN_SQ = 100.0 * 100.0
+    n_normalized = 0
+    rewritten_shapes: set = set()
+    for comp in model.components.values():
+        if abs(comp.x) > NEAR_ZERO or abs(comp.y) > NEAR_ZERO:
+            continue
+        if not comp.shape or shape_refcount.get(comp.shape, 0) != 1:
+            continue
+        if comp.shape in rewritten_shapes:
+            # Defence in depth: a duplicate refcount==1 hit shouldn't
+            # happen, but if it did we'd double-shift the pins.
+            continue
+        shape = model.shapes.get(comp.shape)
+        if shape is None or not shape.pins:
+            continue
+        xs = [p[1] for p in shape.pins]
+        ys = [p[2] for p in shape.pins]
+        # Bounding-box centre — robust to lopsided pin counts (a 100-pin
+        # connector with most pins on one side would skew an arithmetic
+        # mean toward the dense side, but the bbox centre stays put).
+        cx = (min(xs) + max(xs)) / 2.0
+        cy = (min(ys) + max(ys)) / 2.0
+        if (cx * cx + cy * cy) < FAR_FROM_ORIGIN_SQ:
+            # Pin centroid sits near origin. Looks like a normal
+            # relative-coords footprint that just happens to be referenced
+            # once. Leave it alone.
+            continue
+        comp.x = cx
+        comp.y = cy
+        shape.pins = [
+            (name, x - cx, y - cy) for name, x, y in shape.pins
+        ]
+        rewritten_shapes.add(comp.shape)
+        n_normalized += 1
+    return n_normalized
+
+
+def _make_gencad_topology_loader(
+    model: "BoardModel",
+    tracks_widths: Dict[int, float],
+    routes: List[Tuple[str, int, str,
+                       List[Tuple[float, float, float, float]]]],
+) -> Callable[[], Any]:
+    """Return a zero-arg callable that builds and returns a TraceGraph
+    from the parsed GENCAD route data. Captures `model`, `tracks_widths`,
+    and `routes` by closure; called on demand from `BoardModel.topology`.
+    """
+    def _build() -> Any:
+        # Local import to avoid the module-load cycle (see __getattr__).
+        from tvw_topology import TraceGraph, Pad, Segment
+
+        # GENCAD coordinates are float user-units (typically mils, given
+        # `UNITS USER 1000` = 1000 user-units per inch). The canvas
+        # renders components at their original float-mil coords, so
+        # topology coords MUST share that space for traces to land on
+        # the right components. We round to int mils — sub-mil precision
+        # doesn't matter for the trace overlay (typical trace pitch is
+        # 5 mil+) and ints play nicely with SpatialHash / UnionFind
+        # which assume integer cell keys.
+
+        # Net-name → numeric net_id. Keep the same ordering as
+        # `model.signals` so net_ids are stable across reruns.
+        net_names = list(model.signals.keys())
+        net_id_by_name = {n: i for i, n in enumerate(net_names)}
+
+        # Build segments from $ROUTES.
+        segments: List[Any] = []
+        seg_id = 0
+        for net_name, track_id, layer, route_lines in routes:
+            net_id = net_id_by_name.get(net_name, 0)
+            width_user = tracks_widths.get(track_id, 0.0)
+            width = int(round(width_user))
+            for x1, y1, x2, y2 in route_lines:
+                segments.append(Segment(
+                    seg_id=seg_id,
+                    x1=int(round(x1)),
+                    y1=int(round(y1)),
+                    x2=int(round(x2)),
+                    y2=int(round(y2)),
+                    net_id=net_id,
+                    layer=layer,
+                    width=width,
+                ))
+                seg_id += 1
+
+        # Build pads from each component's pin world positions, looking
+        # up the net via $SIGNALS. Same units as the segments so endpoint
+        # dedup can fuse them.
+        import math as _math
+        pin_to_net: Dict[Tuple[str, str], str] = {}
+        for n_name, nodes in model.signals.items():
+            for refdes, pin in nodes:
+                pin_to_net[(refdes, pin)] = n_name
+
+        pads: List[Any] = []
+        pad_id = 0
+        for refdes, comp in model.components.items():
+            shape = model.shapes.get(comp.shape) if comp.shape else None
+            if not shape or not shape.pins:
+                continue
+            theta = _math.radians(comp.rotation)
+            ct, st = _math.cos(theta), _math.sin(theta)
+            comp_layer = comp.layer or "TOP"
+            for pin_name, dx, dy in shape.pins:
+                wx = comp.x + dx * ct - dy * st
+                wy = comp.y + dx * st + dy * ct
+                net_name = pin_to_net.get((refdes, pin_name), "")
+                net_id = net_id_by_name.get(net_name, 0)
+                pads.append(Pad(
+                    pad_id=pad_id,
+                    x=int(round(wx)),
+                    y=int(round(wy)),
+                    net_id=net_id,
+                    layer=comp_layer,
+                    pad_type=0,
+                    stride=38,
+                ))
+                pad_id += 1
+
+        # Construct the TraceGraph. Tolerances are in mils: 1 mil is
+        # roughly the smallest meaningful endpoint spacing on a PCB,
+        # and a typical trace pitch is 5+ mils.
+        #
+        # `pads` / `segments` / `polylines` are no longer dataclass
+        # kwargs — they're @property accessors backed by lazy caches.
+        # We assign through the setters so the lists are stored in
+        # `_pads_cache` / `_segs_cache` / `_polys_cache`. `_build_native`
+        # sees `_pad_arrays is None` and falls back to the legacy
+        # list-of-tuples path, iterating these caches via `self.pads`.
+        tg = TraceGraph(
+            net_names=net_names,
+            endpoint_tol=1,           # 1 mil
+            via_tol=1,                # 1 mil — pads/vias on same node
+            same_net_pad_tol=10,      # 10 mil — bridge multi-pad pins
+            pad_to_trace_tol=2,       # 2 mil — pad↔trace fusion
+        )
+        tg.pads = pads
+        tg.segments = segments
+        tg.polylines = []
+        tg._build()
+        return tg
+
+    return _build
 
 
 def _summary(model: BoardModel) -> str:
@@ -538,9 +864,9 @@ if __name__ == "__main__":
     print(_summary(model))
     print()
 
-    # Spot-check: a few common chipset signal names so you can eyeball that
-    # net resolution / fuzzy matching is working on a Sandy Bridge / H61 board.
-    print("Sample net lookup:")
+    # Spot-check: a handful of common rails / reset signals on a typical
+    # Sandy Bridge / H61 board. Just exercises `find_signal`'s fuzzy match.
+    print("Net lookup:")
     for net in [
         "VCCRTC", "RSMRST#", "RSMRST", "PWRBTN#", "VCCDSW3_3",
         "CPU_VTT", "VCC_DDR", "VTT_DDR", "PLT_RST#", "PLTRST#", "PLTRST",
