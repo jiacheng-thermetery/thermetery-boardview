@@ -186,9 +186,8 @@ def _decode_fz(buf: bytearray, *, source_name: str,
             raise ValueError(
                 f"{source_name}: ASUS-style FZ file (RC6-encrypted body). "
                 f"This needs an FZKey (44 × 32-bit hex words) at "
-                f"private/fz_key.txt. The key is NOT bundled with "
-                f"OpenBoardView and isn't included in this repo — supply "
-                f"your own. See OpenBoardView issue #91 for context."
+                f"private/fz_key.txt. The key isn't included in this repo "
+                f"— supply your own."
             )
         if not _validate_fz_key(key):
             raise ValueError(

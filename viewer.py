@@ -4,7 +4,7 @@
 """
 Boardview viewer — pan/zoom canvas + component & net browser.
 
-Loads a boardview file (.cad / .brd / .brd2 / .bv / .tvw / .pcb) and
+Loads a boardview file (.cad / .brd / .brd2 / .bv / .tvw / .fz / .pcb) and
 renders it in an interactive Tk window. Drag to pan, mouse wheel to zoom,
 Home or "Reset view" to fit-to-window. Click an IC to see its pins
 and per-pin nets; click a row in the Net tab to jump to that pin
@@ -4351,6 +4351,20 @@ class ViewerApp(tk.Tk):
         self.reset_btn = ttk.Button(toolbar, text="Reset view",
                                     command=lambda: self.canvas.reset_view())
         self.reset_btn.pack(side="right", padx=(4, 0))
+        # Rotation buttons. canvas.rotate(steps) is screen-CCW so positive
+        # `steps` is counter-clockwise; negative is clockwise. The arrow
+        # glyphs (↺ / ↻) render reliably on Tk's default Windows / Linux /
+        # macOS fonts. Packed in reverse visual order — first packed sits
+        # rightmost on the side="right" stack, so to get the visual layout
+        # "Rotate↺  Rotate↻  Reset view ..." we pack CW first, then CCW.
+        self.rotate_cw_btn = ttk.Button(
+            toolbar, text="Rotate ↻", width=10,
+            command=lambda: self.canvas.rotate(-1))
+        self.rotate_cw_btn.pack(side="right", padx=(4, 0))
+        self.rotate_ccw_btn = ttk.Button(
+            toolbar, text="Rotate ↺", width=10,
+            command=lambda: self.canvas.rotate(1))
+        self.rotate_ccw_btn.pack(side="right", padx=(4, 0))
 
         # Main paned layout: left = info tabs, right = board canvas
         paned = ttk.Panedwindow(self, orient="horizontal")
@@ -4411,10 +4425,11 @@ class ViewerApp(tk.Tk):
         path = filedialog.askopenfilename(
             title="Open boardview",
             filetypes=[
-                ("Boardview", "*.cad *.brd *.brd2 *.bv *.tvw *.pcb"),
+                ("Boardview", "*.cad *.brd *.brd2 *.bv *.tvw *.fz *.pcb"),
                 ("GENCAD", "*.cad"),
                 ("OpenBoardView ASCII", "*.brd *.brd2 *.bv"),
                 ("Teboview", "*.tvw"),
+                ("Allegro Extracta (ASRock / ASUS)", "*.fz"),
                 ("XZZPCB (MSI / repair shops)", "*.pcb"),
                 ("All files", "*.*"),
             ],
@@ -4665,7 +4680,7 @@ class ViewerApp(tk.Tk):
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
     ap.add_argument("board", nargs="?",
-                    help="Path to a boardview file (.cad/.brd/.brd2/.bv/.tvw/.pcb). "
+                    help="Path to a boardview file (.cad/.brd/.brd2/.bv/.tvw/.fz/.pcb). "
                          "If omitted you'll be prompted.")
     ap.add_argument("--smoke-test", action="store_true",
                     help="Initialize and exit (no mainloop)")
@@ -4682,7 +4697,7 @@ def main() -> None:
             picked = filedialog.askopenfilename(
                 title="Open boardview",
                 filetypes=[
-                    ("Boardview", "*.cad *.brd *.brd2 *.bv *.tvw *.pcb"),
+                    ("Boardview", "*.cad *.brd *.brd2 *.bv *.tvw *.fz *.pcb"),
                     ("All files", "*.*"),
                 ],
                 initialdir=_last_dir() or ".",
