@@ -4,6 +4,14 @@ Status: substantially understood as of 2026-05-07. Cracked by inspection
 of three Gigabyte motherboard files (Z490 VISION G, X570 GAMING X, B550
 AORUS PRO AC) cross-checked against their public PDF schematics.
 
+Starting point: [inflex/teboviewformat](https://github.com/inflex/teboviewformat)
+(MIT, Paul Daniels). The reverse engineering published there established the
+direction; the final decode below — chip-instance pre-32 metadata, the 38-byte
+pad records inside Custom_35/17, the master-footprint coordinate transform —
+was developed independently from cross-board inspection and ground-truth
+comparison against BoardViewer.exe. See `THIRD_PARTY_NOTICES.md` for the
+courtesy reproduction of the upstream MIT notice.
+
 This is a working spec, not a complete one. Sections marked **(unverified)**
 or **(partial)** describe patterns observed but not exhaustively confirmed.
 
@@ -33,10 +41,14 @@ or **(partial)** describe patterns observed but not exhaustively confirmed.
 | 6.05 M – 6.53 M  | 480 KB | chip records (per-component metadata)            |
 | 6.72 M+          | tail   | master footprint section                         |
 
-Region offsets are board-specific. They're hard-coded in
-`tvw_topology.KNOWN_BOARDS` and capped at the net-table start
-dynamically (the originally-recorded BOTTOM end runs into
-footprint definitions which produce false matches).
+Two-layer mobos have one TOP and one BOTTOM trace region; multi-layer
+boards (e.g. GPU PCBs at 8-12 copper layers) have one trace region per
+layer with the same internal structure. Region offsets are auto-detected
+by `tvw_topology._autodetect_layer_regions`, which scans Custom_NN
+Pascal-prefixed headers and picks any one followed by a >= 50 KB payload
+gap. Each detected region is then capped at the net-table start (the
+originally-recorded region ends often run into footprint definitions
+that produce false matches downstream).
 
 ## 3. Custom_NN section markers
 

@@ -4,8 +4,8 @@
 """
 Boardview viewer — pan/zoom canvas + component & net browser.
 
-Loads a boardview file (.cad / .brd / .brd2 / .bv / .tvw) and renders
-it in an interactive Tk window. Drag to pan, mouse wheel to zoom,
+Loads a boardview file (.cad / .brd / .brd2 / .bv / .tvw / .pcb) and
+renders it in an interactive Tk window. Drag to pan, mouse wheel to zoom,
 Home or "Reset view" to fit-to-window. Click an IC to see its pins
 and per-pin nets; click a row in the Net tab to jump to that pin
 on the other side of the board (auto-flips layer).
@@ -37,6 +37,32 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from boardview import BoardModel, Component, parse as parse_board, is_stub_format
+
+
+def _surface_model_warnings(model: BoardModel, parent=None) -> None:
+    """If the parser flagged anything on `model.warnings`, show it to
+    the user as a single modal popup. Silent for parsers that don't
+    set the attribute, or for clean parses (empty list).
+
+    Used to surface partial-parse situations the loader can't or won't
+    raise for — e.g. XZZPCB without a configured key, where the model
+    still loads but is missing every encrypted part/pin record."""
+    warnings = getattr(model, "warnings", None)
+    if not warnings:
+        return
+    title = "Boardview parsed with warnings"
+    body = (
+        "The boardview loaded, but the parser flagged the following — "
+        "parts of the board may be missing from the model:\n\n"
+        + "\n".join(f"  • {w}" for w in warnings)
+    )
+    try:
+        messagebox.showwarning(title, body, parent=parent)
+    except tk.TclError:
+        import sys
+        print(f"[viewer] {title}", file=sys.stderr)
+        for w in warnings:
+            print(f"  - {w}", file=sys.stderr)
 
 # Optional Skia + numpy stack for fast trace rendering. The trace layer
 # can have 40 k+ segments; tk.Canvas's per-line round-trip makes that
@@ -141,6 +167,77 @@ def _pin_sort_key(pn: Tuple[str, str]) -> Tuple[int, str, int, str]:
     return (2, p, 0, "")
 
 
+# ----- Layer palette ------------------------------------------------------
+#
+# Per-layer colors used by both the CPU and GL trace renderers. Inner layers
+# come from a 6-entry palette cycled by the index in the layer name; the
+# outer copper keeps the long-standing TOP=blue / BOTTOM=red identity.
+# Each tuple is (bright, dim) — bright is for the highlighted-net overlay,
+# dim is for the all-traces background. The cross-layer highlight uses
+# the bright variant for the *currently-viewed* layer's TRACE_HIGHLIGHT
+# (yellow), and the bright palette color for off-current-layer segments
+# so it's still obvious which layer a stretch of trace is on.
+_LAYER_OUTER = {
+    "TOP":    ("#5b8fff", "#1c2c50"),
+    "BOTTOM": ("#ff6b5b", "#3a1c14"),
+}
+_LAYER_INNER_PALETTE = [
+    ("#5bff8f", "#1c5025"),  # green
+    ("#bf5bff", "#350c4d"),  # purple
+    ("#5bffe1", "#0c4d44"),  # cyan
+    ("#ffaa5b", "#4d2d10"),  # orange
+    ("#ff5bbf", "#4d0c35"),  # pink
+    ("#bfff5b", "#3a4d0c"),  # lime
+]
+
+
+def _layer_color(layer: str, *, dim: bool = False) -> str:
+    """Return the palette color for a layer name. `dim=False` gives the
+    bright (highlight) tone, `dim=True` gives the muted background tone.
+    Unknown layer names fall back to TOP."""
+    if layer in _LAYER_OUTER:
+        bright, dimmed = _LAYER_OUTER[layer]
+        return dimmed if dim else bright
+    if layer.startswith("INNER_"):
+        try:
+            idx = int(layer.split("_", 1)[1]) - 1
+        except (ValueError, IndexError):
+            idx = 0
+        bright, dimmed = _LAYER_INNER_PALETTE[idx % len(_LAYER_INNER_PALETTE)]
+        return dimmed if dim else bright
+    bright, dimmed = _LAYER_OUTER["TOP"]
+    return dimmed if dim else bright
+
+
+def _available_layers_for(board: BoardModel) -> List[str]:
+    """Layers the user can switch the viewport to. Always at least
+    [TOP, BOTTOM] — the data model's `Component.layer` is constrained to
+    those two regardless of how many copper layers a board has. Boards
+    with a built trace topology contribute their `_layer_names` so inner
+    copper (INNER_1..N on multi-layer GPU PCBs) shows up too.
+
+    The topology is NOT built here — that's a 3-6 s scan we don't want
+    to trigger just to populate a dropdown. We only read `_layer_names`
+    if the topology was already cached (i.e. the user has enabled the
+    trace overlay at least once); before that, the dropdown shows just
+    TOP/BOTTOM. This matches the UX where inner-layer view is only
+    meaningful once you can actually see traces."""
+    base = ["TOP", "BOTTOM"]
+    topo = getattr(board, "_topology", None)
+    if topo is None:
+        return base
+    extra = list(getattr(topo, "_layer_names", []) or [])
+    if not extra:
+        return base
+    seen = set(base)
+    out = list(base)
+    for name in extra:
+        if name not in seen:
+            out.append(name)
+            seen.add(name)
+    return out
+
+
 # ----- Board canvas -------------------------------------------------------
 
 class BoardCanvasCPU(tk.Canvas):
@@ -170,6 +267,12 @@ class BoardCanvasCPU(tk.Canvas):
     TRACE_DIMMED_BOTTOM = "#3a1c14"
     TRACE_HIGHLIGHT = "#ffff66"
     TRACE_DIMMED_ZOOM_THRESHOLD = 2.0
+    # Faint outline colour used when an inner copper layer is in view.
+    # Components live on TOP/BOTTOM only, so on an inner-layer view we
+    # render every component as a ghost in this colour for orientation —
+    # so the user can see "the trace I'm looking at runs under the
+    # CPU socket" without losing the layer they care about.
+    GHOST_OUTLINE = "#2a3052"
     MIN_ZOOM = 0.4
     MAX_ZOOM = 60.0
     WHEEL_FACTOR = 1.15
@@ -201,6 +304,16 @@ class BoardCanvasCPU(tk.Canvas):
         self._show_traces: bool = False
         self._selected_net: Optional[str] = None
         self._on_traces_change: Optional[Callable[[bool], None]] = None
+        # Measurement-tool state. _measure_mode: when True, click captures
+        # endpoints instead of selecting components. _measure_pts: world
+        # (file-unit) coords, len 0/1/2. _measure_hover: live preview of
+        # the second endpoint as the mouse moves with one point already
+        # placed. _on_measure_change fires whenever the visible measurement
+        # changes so the App can update the status bar.
+        self._measure_mode: bool = False
+        self._measure_pts: List[Tuple[float, float]] = []
+        self._measure_hover: Optional[Tuple[float, float]] = None
+        self._on_measure_change: Optional[Callable[[], None]] = None
         # Skia-rasterised trace overlay state. Buffer & surface are sized
         # to the current canvas dimensions and recreated on resize. The
         # PhotoImage reference must be held on the instance — Tk drops
@@ -220,6 +333,113 @@ class BoardCanvasCPU(tk.Canvas):
         self.bind("<ButtonPress-1>", self._on_press)
         self.bind("<B1-Motion>", self._on_drag)
         self.bind("<ButtonRelease-1>", self._on_release)
+        # Bare cursor motion (no button held) — only consumed by the
+        # measurement live-preview when one endpoint is already placed.
+        # Cheap when measure mode is off (just a None check + return).
+        self.bind("<Motion>", self._on_motion)
+
+    # ---- Measurement tool -----------------------------------------------
+
+    @property
+    def measure_mode(self) -> bool:
+        return self._measure_mode
+
+    def set_measure_mode(self, on: bool) -> None:
+        """Enter or leave measurement mode. Leaving clears any in-progress
+        measurement (one-point pending, two-point displayed)."""
+        if self._measure_mode == on:
+            return
+        self._measure_mode = on
+        self._measure_pts = []
+        self._measure_hover = None
+        self.config(cursor="crosshair" if on else "")
+        self._redraw()
+        if self._on_measure_change:
+            self._on_measure_change()
+
+    def clear_measurement(self) -> None:
+        """Wipe the placed measurement points (e.g. Esc key). Mode stays on."""
+        if not self._measure_pts and not self._measure_hover:
+            return
+        self._measure_pts = []
+        self._measure_hover = None
+        self._redraw()
+        if self._on_measure_change:
+            self._on_measure_change()
+
+    def set_measure_change_callback(
+        self, cb: Optional[Callable[[], None]],
+    ) -> None:
+        self._on_measure_change = cb
+
+    def measurement_distance_units(self) -> Optional[float]:
+        """Length of the current measurement in raw file units (None if
+        fewer than two points are placed). Used by the App's status bar."""
+        if len(self._measure_pts) < 2:
+            return None
+        (x1, y1), (x2, y2) = self._measure_pts[0], self._measure_pts[1]
+        return ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+
+    def measurement_distance_preview_units(self) -> Optional[float]:
+        """Length from the placed first point to the live hover position
+        (None if not in single-point-pending state)."""
+        if len(self._measure_pts) != 1 or self._measure_hover is None:
+            return None
+        (x1, y1) = self._measure_pts[0]
+        x2, y2 = self._measure_hover
+        return ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+
+    def units_per_mm(self) -> float:
+        """Heuristic file-unit-to-mm scale.
+
+        TVW stores coords in centi-mil (1/100,000 inch) -> 3937 u/mm.
+        GENCAD and OpenBoardView ASCII store coords in mil (1/1,000
+        inch) -> 39.37 u/mm. Detection: look at the component-bbox
+        extent. For any real PCB the longest side is on the order of
+        100-400 mm. If the in-file extent is > 50,000 units, we're in
+        TVW's centi-mil coordinate system; otherwise we're in mils.
+        Cached after first computation.
+        """
+        cached = getattr(self, "_units_per_mm_cache", None)
+        if cached is not None:
+            return cached
+        xs = [c.x for c in self.board.components.values()]
+        ys = [c.y for c in self.board.components.values()]
+        if not xs:
+            scale = 39.37
+        else:
+            span = max(max(xs) - min(xs), max(ys) - min(ys))
+            scale = 3937.0 if span > 50_000 else 39.37
+        self._units_per_mm_cache = scale
+        return scale
+
+    def _format_distance(self, d_units: float) -> str:
+        """Pretty-print a distance in mm + mil. mm shown to 3 dp above 1 mm,
+        as μm below that. Useful for both BGA pin pitches (~0.4 mm) and
+        full board diagonals (~300 mm)."""
+        upm = self.units_per_mm()
+        mm = d_units / upm
+        mil = mm * 39.3701
+        if mm >= 1.0:
+            return f"{mm:.3f} mm  ({mil:.1f} mil)"
+        return f"{mm * 1000:.1f} um  ({mil:.2f} mil)"
+
+    def _on_motion(self, event: tk.Event) -> None:
+        if not self._measure_mode or len(self._measure_pts) != 1:
+            return
+        wx, wy = self._unproject(event.x, event.y)
+        # Coalesce sub-pixel jitter — only redraw if hover moved more than
+        # half a pixel in screen space (cheap visible-stability win).
+        prev = self._measure_hover
+        if prev is not None:
+            w, h = self.winfo_width(), self.winfo_height()
+            psx, psy = self._project(prev[0], prev[1], w, h)
+            if abs(psx - event.x) < 0.5 and abs(psy - event.y) < 0.5:
+                return
+        self._measure_hover = (wx, wy)
+        self._redraw()
+        if self._on_measure_change:
+            self._on_measure_change()
 
     @property
     def view_layer(self) -> str:
@@ -325,7 +545,9 @@ class BoardCanvasCPU(tk.Canvas):
             self._on_traces_change(self._show_traces)
 
     def set_view_layer(self, layer: str) -> None:
-        if layer == self._view_layer or layer not in ("TOP", "BOTTOM"):
+        if layer == self._view_layer:
+            return
+        if layer not in _available_layers_for(self.board):
             return
         self._reorient(lambda: setattr(self, "_view_layer", layer))
         if self._on_layer_change:
@@ -555,37 +777,165 @@ class BoardCanvasCPU(tk.Canvas):
         if self._show_traces:
             self._draw_traces(w, h)
 
-        for c in self._sorted_components:
-            if c.layer != self._view_layer:
-                continue
-            if c.refdes in self._highlight or c.refdes == self._selected_refdes:
-                continue
-            self._draw_one(c, w, h, dot_r, mode="normal")
+        is_inner = self._view_layer not in ("TOP", "BOTTOM")
+        if is_inner:
+            # Inner copper layer in view: components live on TOP/BOTTOM
+            # only and aren't "on" this layer, but their outlines still
+            # tell the user what they're looking under. Render every
+            # component as a faint outline ghost — no fills, no labels,
+            # no pins, no highlight/selection.
+            for c in self._sorted_components:
+                self._draw_ghost(c, w, h)
+        else:
+            for c in self._sorted_components:
+                if c.layer != self._view_layer:
+                    continue
+                if c.refdes in self._highlight or c.refdes == self._selected_refdes:
+                    continue
+                self._draw_one(c, w, h, dot_r, mode="normal")
 
-        for refdes in self._highlight:
-            if refdes == self._selected_refdes:
-                continue
-            c = self.board.components.get(refdes)
-            if c and c.layer == self._view_layer:
-                self._draw_one(c, w, h, dot_r, mode="highlight")
+            for refdes in self._highlight:
+                if refdes == self._selected_refdes:
+                    continue
+                c = self.board.components.get(refdes)
+                if c and c.layer == self._view_layer:
+                    self._draw_one(c, w, h, dot_r, mode="highlight")
 
-        if self._selected_refdes:
-            c = self.board.components.get(self._selected_refdes)
-            if c and c.layer == self._view_layer:
-                self._draw_one(c, w, h, dot_r, mode="selected")
-                self._draw_pins(c, w, h)
+            if self._selected_refdes:
+                c = self.board.components.get(self._selected_refdes)
+                if c and c.layer == self._view_layer:
+                    self._draw_one(c, w, h, dot_r, mode="selected")
+                    self._draw_pins(c, w, h)
 
         zoom_pct = int(self.zoom * 100)
-        n_layer = sum(1 for c in self.board.components.values()
-                      if c.layer == self._view_layer)
-        layer_indicator = "TOP (looking down)" if self._view_layer == "TOP" \
-            else "BOTTOM (mirrored, as if board flipped)"
+        if is_inner:
+            n_layer = len(self.board.components)
+            layer_indicator = (
+                f"{self._view_layer} (inner copper, ghost components)"
+            )
+        else:
+            n_layer = sum(1 for c in self.board.components.values()
+                          if c.layer == self._view_layer)
+            layer_indicator = ("TOP (looking down)"
+                               if self._view_layer == "TOP"
+                               else "BOTTOM (mirrored, as if board flipped)")
+        if not self._measure_mode:
+            hint_extra = "  •  M=measure"
+        else:
+            d = self.measurement_distance_units()
+            d_prev = self.measurement_distance_preview_units()
+            if d is not None:
+                readout = f"  •  measured: {self._format_distance(d)}"
+            elif d_prev is not None:
+                readout = (
+                    f"  •  preview: {self._format_distance(d_prev)} "
+                    "(click for 2nd pt)")
+            else:
+                readout = "  •  click first point"
+            hint_extra = (
+                "  •  measure mode" + readout
+                + "  •  Esc to clear  •  M to exit"
+            )
+        comp_label = ("ghost components"
+                      if is_inner
+                      else "components on this layer")
         self.create_text(
             8, 8,
-            text=(f"{layer_indicator}  •  {n_layer} components on this layer  •  "
+            text=(f"{layer_indicator}  •  {n_layer} {comp_label}  •  "
                   f"zoom {zoom_pct}%  •  drag to pan, wheel to zoom, click an IC, "
-                  "click a pin while selected, L=flip, Home=reset"),
+                  "click a pin while selected, L=cycle layer, Home=reset"
+                  + hint_extra),
             anchor="nw", fill="#aaaadd", font=("Segoe UI", 8),
+        )
+
+        # Measurement overlay sits on top of components and traces. Drawing
+        # here (last in _redraw) keeps it on top after the canvas redraws.
+        if self._measure_mode and (self._measure_pts or self._measure_hover):
+            self._draw_measurement_overlay(w, h)
+
+    def _draw_measurement_overlay(self, w: int, h: int) -> None:
+        """Render the in-progress / completed measurement: endpoint dots,
+        a connecting line, and a distance label at the line midpoint."""
+        MEAS_COLOR = "#ffd24d"          # warm yellow, distinct from select cyan
+        MEAS_OUTLINE = "#000000"
+        DOT_R = 4
+
+        def project(wxy: Tuple[float, float]) -> Tuple[float, float]:
+            return self._project(wxy[0], wxy[1], w, h)
+
+        # Compose the line from placed point(s) + hover preview.
+        endpoints: List[Tuple[float, float]] = list(self._measure_pts)
+        if len(endpoints) == 1 and self._measure_hover is not None:
+            endpoints = endpoints + [self._measure_hover]
+
+        # Draw endpoint dots first.
+        for wxy in self._measure_pts:
+            sx, sy = project(wxy)
+            self.create_oval(sx - DOT_R, sy - DOT_R, sx + DOT_R, sy + DOT_R,
+                             fill=MEAS_COLOR, outline=MEAS_OUTLINE, width=1)
+
+        # Draw the connecting line + label only when we have two endpoints
+        # (placed-placed, or placed-hover for the live preview).
+        if len(endpoints) == 2:
+            (x1, y1), (x2, y2) = endpoints
+            sx1, sy1 = project((x1, y1))
+            sx2, sy2 = project((x2, y2))
+            # Black halo behind the colored line so it stays legible over
+            # both light (component fills) and dark (board background) areas.
+            self.create_line(sx1, sy1, sx2, sy2,
+                             fill=MEAS_OUTLINE, width=4, capstyle="round")
+            self.create_line(sx1, sy1, sx2, sy2,
+                             fill=MEAS_COLOR, width=2, capstyle="round")
+            # Hover-preview endpoint dot — drawn AFTER the line so it sits
+            # on top, but smaller / hollow to differentiate from placed points.
+            if len(self._measure_pts) == 1:
+                self.create_oval(sx2 - DOT_R, sy2 - DOT_R,
+                                 sx2 + DOT_R, sy2 + DOT_R,
+                                 fill="", outline=MEAS_COLOR, width=2)
+            # Distance label centred on the segment midpoint, offset slightly
+            # perpendicular so it doesn't sit on top of the line.
+            d_units = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+            label = self._format_distance(d_units)
+            mx, my = (sx1 + sx2) / 2, (sy1 + sy2) / 2
+            # Perpendicular offset (12 px) — pick the side away from origin
+            # so labels on different measurements don't collide.
+            dx, dy = sx2 - sx1, sy2 - sy1
+            seg_len = max((dx * dx + dy * dy) ** 0.5, 1.0)
+            ox, oy = -dy / seg_len * 14, dx / seg_len * 14
+            tx, ty = mx + ox, my + oy
+            # Background pill for legibility.
+            text_id = self.create_text(
+                tx, ty, text=label, fill=MEAS_COLOR,
+                font=("Segoe UI", 10, "bold"), anchor="center",
+            )
+            bbox = self.bbox(text_id)
+            if bbox:
+                bx0, by0, bx1, by1 = bbox
+                pad = 3
+                bg = self.create_rectangle(
+                    bx0 - pad, by0 - pad, bx1 + pad, by1 + pad,
+                    fill="#1a1a1a", outline=MEAS_COLOR, width=1,
+                )
+                # Restack so the text is on top of its background pill.
+                self.tag_raise(text_id, bg)
+
+    def _draw_ghost(self, c: Component, w: int, h: int) -> None:
+        """Draw `c` as a faint outline only — used when an inner copper
+        layer is in view. No fill, no label, no pin dots; the goal is
+        just to give the user enough orientation to know which traces
+        are running under which chip without distracting from the
+        copper they're inspecting."""
+        poly = self._component_polygon_screen(c, w, h)
+        if poly is None:
+            return
+        x0p, y0p, x1p, y1p = self._bbox_of_points(poly)
+        if x1p < -10 or x0p > w + 10 or y1p < -10 or y0p > h + 10:
+            return
+        if (x1p - x0p) < 2 and (y1p - y0p) < 2:
+            return
+        flat = [coord for pt in poly for coord in pt]
+        self.create_polygon(
+            *flat, fill="", outline=self.GHOST_OUTLINE, width=1.0,
         )
 
     def _draw_one(
@@ -718,11 +1068,12 @@ class BoardCanvasCPU(tk.Canvas):
             except Exception:
                 sel_net_id = None
 
-        # Phase A — dimmed all-traces (zoom-gated, viewport-culled).
+        # Phase A — dimmed all-traces on the *current* layer (zoom-gated,
+        # viewport-culled). Other layers' background traces are not drawn:
+        # rendering 13 k segments × N layers would overwhelm the display
+        # and the user only needs the current layer's structural context.
         if self.zoom >= self.TRACE_DIMMED_ZOOM_THRESHOLD:
-            dim_hex = (self.TRACE_DIMMED_TOP if layer == "TOP"
-                       else self.TRACE_DIMMED_BOTTOM)
-            r, g, b, a = self._hex_to_rgba(dim_hex)
+            r, g, b, a = self._hex_to_rgba(_layer_color(layer, dim=True))
             paint = _skia.Paint()
             paint.setColor(_skia.Color(r, g, b, a))
             paint.setStrokeWidth(1.0)
@@ -742,30 +1093,51 @@ class BoardCanvasCPU(tk.Canvas):
                 p1x, p1y = self._project(seg.x2, seg.y2, w, h)
                 canvas.drawLine(p0x, p0y, p1x, p1y, paint)
 
-        # Phase B — bright highlight for selected net.
+        # Phase B — selected-net highlight, spanning every layer the net
+        # touches. Current-layer segments get the bright TRACE_HIGHLIGHT
+        # (yellow); off-current-layer segments get the bright variant of
+        # their layer's palette color so it's visually obvious which
+        # layer a stretch of trace is on. The graph already fuses
+        # cross-layer connectivity through vias (UF unions in
+        # tvw_topology.py); we just stop filtering by layer here.
         if sel_net_id is not None:
             try:
                 segs, polys = topo.geometry_on_net(sel_net_id)
             except Exception:
                 segs, polys = [], []
-            r, g, b, a = self._hex_to_rgba(self.TRACE_HIGHLIGHT)
-            paint = _skia.Paint()
-            paint.setColor(_skia.Color(r, g, b, a))
-            paint.setStrokeWidth(2.0)
-            paint.setAntiAlias(True)
+
+            # Cache one Paint per (layer, role) — the loop below would
+            # otherwise allocate a Paint per segment.
+            paint_cache: Dict[Tuple[str, str], "_skia.Paint"] = {}
+
+            def _paint_for(seg_layer: str, role: str) -> "_skia.Paint":
+                key = (seg_layer, role)
+                p = paint_cache.get(key)
+                if p is not None:
+                    return p
+                p = _skia.Paint()
+                if seg_layer == layer:
+                    color_hex = self.TRACE_HIGHLIGHT
+                else:
+                    color_hex = _layer_color(seg_layer, dim=False)
+                rr, gg, bb, aa = self._hex_to_rgba(color_hex)
+                p.setColor(_skia.Color(rr, gg, bb, aa))
+                if role == "seg":
+                    p.setStrokeWidth(2.0 if seg_layer == layer else 1.5)
+                    p.setAntiAlias(True)
+                else:  # poly
+                    p.setStrokeWidth(1.0)
+                    p.setAntiAlias(True)
+                    p.setStyle(_skia.Paint.Style.kStroke_Style)
+                paint_cache[key] = p
+                return p
+
             for seg in segs:
-                if seg.layer != layer:
-                    continue
                 p0x, p0y = self._project(seg.x1, seg.y1, w, h)
                 p1x, p1y = self._project(seg.x2, seg.y2, w, h)
-                canvas.drawLine(p0x, p0y, p1x, p1y, paint)
-            paint_thin = _skia.Paint()
-            paint_thin.setColor(_skia.Color(r, g, b, a))
-            paint_thin.setStrokeWidth(1.0)
-            paint_thin.setAntiAlias(True)
-            paint_thin.setStyle(_skia.Paint.Style.kStroke_Style)
+                canvas.drawLine(p0x, p0y, p1x, p1y, _paint_for(seg.layer, "seg"))
             for poly in polys:
-                if poly.layer != layer or len(poly.vertices) < 2:
+                if len(poly.vertices) < 2:
                     continue
                 path = _skia.Path()
                 vx, vy = poly.vertices[0]
@@ -774,7 +1146,7 @@ class BoardCanvasCPU(tk.Canvas):
                 for vx, vy in poly.vertices[1:]:
                     px, py = self._project(vx, vy, w, h)
                     path.lineTo(px, py)
-                canvas.drawPath(path, paint_thin)
+                canvas.drawPath(path, _paint_for(poly.layer, "poly"))
 
         self._skia_surface.flushAndSubmit()
         # Buffer is fully opaque (we cleared with opaque BG and drew opaque
@@ -802,8 +1174,7 @@ class BoardCanvasCPU(tk.Canvas):
             except Exception:
                 sel_net_id = None
         if self.zoom >= self.TRACE_DIMMED_ZOOM_THRESHOLD:
-            dimmed_color = (self.TRACE_DIMMED_TOP if layer == "TOP"
-                            else self.TRACE_DIMMED_BOTTOM)
+            dimmed_color = _layer_color(layer, dim=True)
             for seg in topo.segments:
                 if seg.layer != layer:
                     continue
@@ -824,22 +1195,30 @@ class BoardCanvasCPU(tk.Canvas):
                 segs, polys = topo.geometry_on_net(sel_net_id)
             except Exception:
                 segs, polys = [], []
+
+            # Cross-layer highlight: current layer = TRACE_HIGHLIGHT,
+            # off-current layers = bright palette color for that layer.
+            def _hl_for(seg_layer: str) -> str:
+                return (self.TRACE_HIGHLIGHT if seg_layer == layer
+                        else _layer_color(seg_layer, dim=False))
+
             for seg in segs:
-                if seg.layer != layer:
-                    continue
                 p0x, p0y = self._project(seg.x1, seg.y1, w, h)
                 p1x, p1y = self._project(seg.x2, seg.y2, w, h)
-                self.create_line(p0x, p0y, p1x, p1y,
-                                 fill=self.TRACE_HIGHLIGHT, width=2)
+                self.create_line(
+                    p0x, p0y, p1x, p1y,
+                    fill=_hl_for(seg.layer),
+                    width=2 if seg.layer == layer else 1,
+                )
             for poly in polys:
-                if poly.layer != layer:
-                    continue
                 pts: List[float] = []
                 for vx, vy in poly.vertices:
                     px, py = self._project(vx, vy, w, h)
                     pts.append(px); pts.append(py)
                 if len(pts) >= 4:
-                    self.create_line(*pts, fill=self.TRACE_HIGHLIGHT, width=1)
+                    self.create_line(
+                        *pts, fill=_hl_for(poly.layer), width=1,
+                    )
 
     def _draw_pins(self, c: Component, w: int, h: int) -> None:
         shape = self.board.shapes.get(c.shape)
@@ -921,6 +1300,24 @@ class BoardCanvasCPU(tk.Canvas):
             self._handle_click(event.x, event.y)
 
     def _handle_click(self, cx: int, cy: int) -> None:
+        # Measurement mode short-circuits component / pin selection. Two
+        # points get captured; a third click resets and starts a new pair
+        # (so users can measure repeatedly without leaving and re-entering
+        # the mode).
+        if self._measure_mode:
+            wx, wy = self._unproject(cx, cy)
+            if len(self._measure_pts) >= 2:
+                self._measure_pts = [(wx, wy)]
+                self._measure_hover = None
+            else:
+                self._measure_pts.append((wx, wy))
+                if len(self._measure_pts) == 2:
+                    self._measure_hover = None
+            self._redraw()
+            if self._on_measure_change:
+                self._on_measure_change()
+            return
+
         if self._selected_refdes:
             comp = self.board.components.get(self._selected_refdes)
             if comp and comp.layer == self._view_layer:
@@ -970,17 +1367,43 @@ class BoardCanvasCPU(tk.Canvas):
         return best_pin
 
     def _find_component_at(self, cx: int, cy: int) -> Optional[str]:
+        # When several components contain the click, the original rule
+        # "smallest screen area wins" works fine for normal nesting (a
+        # chip drawn over a connector outline) but breaks when the .cad
+        # file annotates a chip's keep-out zone with a duplicate
+        # rectangle that has only a handful of mounting pins. On the
+        # ROG Maximus Z690 .cad, `LGA_1200_HOLE` (4 corner pins, slightly
+        # smaller bbox) was stealing every click from `LGA1700` (1708
+        # real socket pins) — the user never saw the actual socket pins.
+        #
+        # Fix: weight the area by a pin-density factor. Sparsely-pinned
+        # components get a penalty so they lose ties to densely-pinned
+        # ones with similar bbox. Tuned so an 8+ pin component beats a
+        # 4-pin HOLE annotation of similar size; nested chips inside
+        # outlines still win because their area is much smaller.
         w, h = self.winfo_width(), self.winfo_height()
         candidates = [c for c in self.board.components.values()
                       if c.layer == self._view_layer]
         best_refdes = None
-        best_area = float("inf")
+        best_score = float("inf")
         for c in candidates:
             poly = self._component_polygon_screen(c, w, h)
             if poly and self._point_in_poly(cx, cy, poly):
                 area = self._poly_area(poly)
-                if area < best_area:
-                    best_area = area
+                shape = self.board.shapes.get(c.shape)
+                n_pins = len(shape.pins) if shape else 0
+                # Sparsity factor: 8x penalty for pin-less or 1-pin
+                # components (board outlines, mechanical anchors), down
+                # to 1x at 8+ pins. Real chips with ≥8 pins are
+                # unaffected so dense-pin nesting still resolves to
+                # the innermost chip.
+                if n_pins >= 8:
+                    factor = 1.0
+                else:
+                    factor = 8.0 / max(1, n_pins)
+                score = area * factor
+                if score < best_score:
+                    best_score = score
                     best_refdes = c.refdes
         if best_refdes:
             return best_refdes
@@ -1075,6 +1498,7 @@ if _GL_AVAILABLE:
         TRACE_DIMMED_BOTTOM = BoardCanvasCPU.TRACE_DIMMED_BOTTOM
         TRACE_HIGHLIGHT = BoardCanvasCPU.TRACE_HIGHLIGHT
         TRACE_DIMMED_ZOOM_THRESHOLD = BoardCanvasCPU.TRACE_DIMMED_ZOOM_THRESHOLD
+        GHOST_OUTLINE = BoardCanvasCPU.GHOST_OUTLINE
         MIN_ZOOM = BoardCanvasCPU.MIN_ZOOM
         MAX_ZOOM = BoardCanvasCPU.MAX_ZOOM
         WHEEL_FACTOR = BoardCanvasCPU.WHEEL_FACTOR
@@ -1113,6 +1537,13 @@ if _GL_AVAILABLE:
             self._show_traces: bool = False
             self._selected_net: Optional[str] = None
             self._on_traces_change: Optional[Callable[[bool], None]] = None
+            # Measurement-tool state (mirrors BoardCanvasCPU). See that
+            # class's __init__ for the field semantics — same shape, same
+            # public API, just rendered via Skia instead of tk canvas items.
+            self._measure_mode: bool = False
+            self._measure_pts: List[Tuple[float, float]] = []
+            self._measure_hover: Optional[Tuple[float, float]] = None
+            self._on_measure_change: Optional[Callable[[], None]] = None
 
             # GL/Skia state — populated on first initgl() once the
             # OpenGL context is current.
@@ -1150,6 +1581,7 @@ if _GL_AVAILABLE:
             self.bind("<ButtonPress-1>", self._on_press)
             self.bind("<B1-Motion>", self._on_drag)
             self.bind("<ButtonRelease-1>", self._on_release)
+            self.bind("<Motion>", self._on_motion)
 
         # ---- public API ---------------------------------------------------
 
@@ -1237,7 +1669,9 @@ if _GL_AVAILABLE:
                 self._on_traces_change(self._show_traces)
 
         def set_view_layer(self, layer: str) -> None:
-            if layer == self._view_layer or layer not in ("TOP", "BOTTOM"):
+            if layer == self._view_layer:
+                return
+            if layer not in _available_layers_for(self.board):
                 return
             self._reorient(lambda: setattr(self, "_view_layer", layer))
             if self._on_layer_change:
@@ -1703,6 +2137,15 @@ if _GL_AVAILABLE:
 
             self._draw_status_text(canvas, w, h)
 
+            # Measurement overlay sits on top of everything. Drawing it
+            # last in the paint pass mirrors what BoardCanvasCPU does at
+            # the end of _redraw — keeps the line + label legible even
+            # when it crosses dense trace areas.
+            if self._measure_mode and (
+                self._measure_pts or self._measure_hover
+            ):
+                self._draw_measurement_overlay_gl(canvas, w, h)
+
             self._skia_surface.flushAndSubmit()
             # Drop the per-frame projection cache so subsequent
             # hit-test / unproject calls don't pick up a stale view.
@@ -1855,12 +2298,34 @@ if _GL_AVAILABLE:
             # the screen-pixel size threshold is exact).
             self._ensure_comp_arrays()
             arrs = self._comp_arrays
-            world_comp_path = (arrs["comp_path_top"] if view_layer == "TOP"
-                               else arrs["comp_path_bot"])
             (_, _, _, _, _, _, _, _, base_scale, _, _, _, _,
              zoom, _, _) = self._frame_proj
             effective_scale = base_scale * zoom
 
+            view_is_inner = view_layer not in ("TOP", "BOTTOM")
+            if view_is_inner:
+                # Inner copper layer in view: components live on TOP/
+                # BOTTOM only, so paint *both* outline paths in the
+                # faint ghost colour and return early — no labels, no
+                # highlight, no selection. Mirrors BoardCanvasCPU's
+                # `_draw_ghost` ghost-only branch.
+                ghost_paint = _skia.Paint()
+                ghost_paint.setStyle(_skia.Paint.Style.kStroke_Style)
+                ghost_paint.setAntiAlias(True)
+                ghost_paint.setColor(self._hex_to_skia(self.GHOST_OUTLINE))
+                ghost_paint.setStrokeWidth(
+                    1.0 / effective_scale if effective_scale > 1e-6 else 1.0
+                )
+                matrix = self._world_to_screen_matrix()
+                canvas.save()
+                canvas.concat(matrix)
+                canvas.drawPath(arrs["comp_path_top"], ghost_paint)
+                canvas.drawPath(arrs["comp_path_bot"], ghost_paint)
+                canvas.restore()
+                return
+
+            world_comp_path = (arrs["comp_path_top"] if view_layer == "TOP"
+                               else arrs["comp_path_bot"])
             stroke_paint.setColor(layer_color := (
                 top_color if view_layer == "TOP" else bot_color
             ))
@@ -2203,59 +2668,95 @@ if _GL_AVAILABLE:
                     canvas.drawCircle(sx, sy, pin_r, pin_paint)
 
         def _segments_arrays(self, topo):
-            """Return numpy arrays for the topology's segments and a
-            pair of pre-built world-space Skia Paths (one per layer)
-            containing every segment, cached on the topology object.
+            """Return numpy arrays for the topology's segments and one
+            pre-built world-space Skia Path *per layer* containing every
+            segment on that layer, cached on the topology object.
 
             Returns: dict with keys
                 'x1','y1','x2','y2' : (N,) float32
                 'net_id'             : (N,) int32
-                'layer_top'          : (N,) bool
-                'path_top'           : skia.Path of all TOP segments
-                'path_bottom'        : skia.Path of all BOTTOM segments
+                'layer'              : (N,) object array of layer names
+                'paths'              : Dict[str, skia.Path] keyed by layer
             Indexed identically to topo.segments.
 
-            Building the world-space Path takes ~5-10 ms once per
-            board. With it cached, per-frame trace rendering becomes:
-            apply view transform via canvas.concat() + drawPath().
-            That's ~1-2 ms regardless of segment count, since the GPU
-            handles the actual stroking.
+            Building the world-space Paths takes ~5-10 ms once per
+            board. With them cached, per-frame trace rendering becomes:
+            apply view transform via canvas.concat() + drawPath() for
+            the current layer. ~1-2 ms regardless of segment count.
+
+            Multi-layer note: every layer gets its own Path. We no
+            longer drop INNER_n segments on the floor; the renderer
+            picks `paths[view_layer]` whatever the current layer is.
             """
             cache = getattr(topo, "_gl_seg_arrays", None)
             if cache is not None:
                 return cache
-            segs = topo.segments
-            n = len(segs)
-            x1 = _np.empty(n, dtype=_np.float32)
-            y1 = _np.empty(n, dtype=_np.float32)
-            x2 = _np.empty(n, dtype=_np.float32)
-            y2 = _np.empty(n, dtype=_np.float32)
-            net_id = _np.empty(n, dtype=_np.int32)
-            layer_top = _np.empty(n, dtype=_np.bool_)
-            for i, seg in enumerate(segs):
-                x1[i] = seg.x1
-                y1[i] = seg.y1
-                x2[i] = seg.x2
-                y2[i] = seg.y2
-                net_id[i] = seg.net_id
-                layer_top[i] = (seg.layer == "TOP")
-            # Pre-build the world-space dimmed paths. We negate Y at
-            # build time so the Skia matrix is a pure positive-scale
-            # transform — Skia's coordinate convention has y growing
-            # down, board coords have y growing up.
-            path_top = _skia.Path()
-            path_bot = _skia.Path()
+            # Fast path: read directly from the topology's numpy
+            # storage when present. Avoids materialising 43 K Segment
+            # dataclass instances just to copy 6 fields out. Falls
+            # back to the legacy list iteration for graphs without
+            # `_seg_arrays` (cache-loaded from older format, GENCAD).
+            seg_arr = getattr(topo, "_seg_arrays", None)
+            layer_names = list(getattr(topo, "_layer_names", []) or [])
+            if seg_arr is not None:
+                # Cast int32 → float32 once with numpy (vectorised).
+                x1 = seg_arr["x1"].astype(_np.float32, copy=True)
+                y1 = seg_arr["y1"].astype(_np.float32, copy=True)
+                x2 = seg_arr["x2"].astype(_np.float32, copy=True)
+                y2 = seg_arr["y2"].astype(_np.float32, copy=True)
+                net_id = seg_arr["net_id"].astype(_np.int32, copy=True)
+                # `layer` is stored as uint8 indexed into `_layer_names`.
+                # Map each byte to its name for the dict-keyed paths.
+                layer_bytes = seg_arr["layer"]
+                seg_layer = _np.empty(layer_bytes.shape[0], dtype=object)
+                if layer_names:
+                    n_names = len(layer_names)
+                    lb_list = layer_bytes.tolist()
+                    for i, b in enumerate(lb_list):
+                        seg_layer[i] = (layer_names[b]
+                                        if 0 <= b < n_names else "TOP")
+                else:
+                    # No layer table — assume the historical 2-layer
+                    # encoding (0=TOP, 1=BOTTOM).
+                    lb_list = layer_bytes.tolist()
+                    for i, b in enumerate(lb_list):
+                        seg_layer[i] = "TOP" if b == 0 else "BOTTOM"
+                n = int(x1.shape[0])
+            else:
+                segs = topo.segments
+                n = len(segs)
+                x1 = _np.empty(n, dtype=_np.float32)
+                y1 = _np.empty(n, dtype=_np.float32)
+                x2 = _np.empty(n, dtype=_np.float32)
+                y2 = _np.empty(n, dtype=_np.float32)
+                net_id = _np.empty(n, dtype=_np.int32)
+                seg_layer = _np.empty(n, dtype=object)
+                for i, seg in enumerate(segs):
+                    x1[i] = seg.x1
+                    y1[i] = seg.y1
+                    x2[i] = seg.x2
+                    y2[i] = seg.y2
+                    net_id[i] = seg.net_id
+                    seg_layer[i] = seg.layer
+            # Pre-build the world-space dimmed paths, one per layer.
+            # We negate Y at build time so the Skia matrix is a pure
+            # positive-scale transform — Skia's y grows down, board y
+            # grows up.
+            paths: Dict[str, "_skia.Path"] = {}
             x1_l = x1.tolist(); y1_l = y1.tolist()
             x2_l = x2.tolist(); y2_l = y2.tolist()
-            top_l = layer_top.tolist()
             for i in range(n):
-                p = path_top if top_l[i] else path_bot
+                ln = seg_layer[i]
+                p = paths.get(ln)
+                if p is None:
+                    p = _skia.Path()
+                    paths[ln] = p
                 p.moveTo(x1_l[i], -y1_l[i])
                 p.lineTo(x2_l[i], -y2_l[i])
             cache = {
                 "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                "net_id": net_id, "layer_top": layer_top,
-                "path_top": path_top, "path_bottom": path_bot,
+                "net_id": net_id, "layer": seg_layer,
+                "paths": paths,
             }
             try:
                 topo._gl_seg_arrays = cache
@@ -2432,13 +2933,16 @@ if _GL_AVAILABLE:
             arrs = self._segments_arrays(topo)
 
             # ---- Phase A: dimmed all-traces (matrix-transformed) ---------
-            if self.zoom >= self.TRACE_DIMMED_ZOOM_THRESHOLD:
-                world_path = (arrs["path_top"] if layer == "TOP"
-                              else arrs["path_bottom"])
-                dim_hex = (self.TRACE_DIMMED_TOP if layer == "TOP"
-                           else self.TRACE_DIMMED_BOTTOM)
+            # Only renders the *current* layer's pre-built world-space
+            # path. Inner-layer views show the inner copper; on-screen
+            # rendering of every layer's all-traces would be visually
+            # overwhelming and isn't what the user is asking for.
+            paths = arrs["paths"]
+            if (self.zoom >= self.TRACE_DIMMED_ZOOM_THRESHOLD
+                    and layer in paths):
+                world_path = paths[layer]
                 paint = _skia.Paint()
-                paint.setColor(self._hex_to_skia(dim_hex))
+                paint.setColor(self._hex_to_skia(_layer_color(layer, dim=True)))
                 paint.setStyle(_skia.Paint.Style.kStroke_Style)
                 paint.setStrokeWidth(1.0)
                 paint.setAntiAlias(False)
@@ -2461,29 +2965,44 @@ if _GL_AVAILABLE:
                 canvas.restore()
 
             # ---- Phase B: highlight for the selected net -----------------
+            # Cross-layer: every layer the net touches gets rendered.
+            # Current layer = bright TRACE_HIGHLIGHT (yellow), 2px.
+            # Off-current layers = bright palette color for that layer,
+            # 1.5px. The graph already fuses connectivity through vias
+            # (UF unions in tvw_topology.py); we just stop filtering by
+            # layer here and group by layer for color-coding.
             if sel_net_id is not None:
                 try:
                     segs, polys = topo.geometry_on_net(sel_net_id)
                 except Exception:
                     segs, polys = [], []
-                hi_color = self._hex_to_skia(self.TRACE_HIGHLIGHT)
-                seg_paint = _skia.Paint()
-                seg_paint.setColor(hi_color)
-                seg_paint.setStyle(_skia.Paint.Style.kStroke_Style)
-                seg_paint.setStrokeWidth(2.0)
-                seg_paint.setAntiAlias(True)
-                # Flatten layer-matched segments into 4 numpy arrays
-                # then project in one numpy call.
-                sx1l: List[float] = []
-                sy1l: List[float] = []
-                sx2l: List[float] = []
-                sy2l: List[float] = []
+
+                # Group segments by their layer. One drawPath per layer
+                # keeps batching efficient — ~1 paint+drawPath per layer
+                # per frame instead of one paint per segment.
+                segs_by_layer: Dict[str, List] = {}
                 for seg in segs:
-                    if seg.layer != layer:
+                    segs_by_layer.setdefault(seg.layer, []).append(seg)
+
+                for seg_layer, seg_list in segs_by_layer.items():
+                    is_current = (seg_layer == layer)
+                    color_hex = (self.TRACE_HIGHLIGHT if is_current
+                                 else _layer_color(seg_layer, dim=False))
+                    seg_paint = _skia.Paint()
+                    seg_paint.setColor(self._hex_to_skia(color_hex))
+                    seg_paint.setStyle(_skia.Paint.Style.kStroke_Style)
+                    seg_paint.setStrokeWidth(2.0 if is_current else 1.5)
+                    seg_paint.setAntiAlias(True)
+
+                    sx1l: List[float] = []
+                    sy1l: List[float] = []
+                    sx2l: List[float] = []
+                    sy2l: List[float] = []
+                    for seg in seg_list:
+                        sx1l.append(seg.x1); sy1l.append(seg.y1)
+                        sx2l.append(seg.x2); sy2l.append(seg.y2)
+                    if not sx1l:
                         continue
-                    sx1l.append(seg.x1); sy1l.append(seg.y1)
-                    sx2l.append(seg.x2); sy2l.append(seg.y2)
-                if sx1l:
                     a1x = _np.asarray(sx1l, dtype=_np.float32)
                     a1y = _np.asarray(sy1l, dtype=_np.float32)
                     a2x = _np.asarray(sx2l, dtype=_np.float32)
@@ -2500,40 +3019,44 @@ if _GL_AVAILABLE:
                         seg_path.lineTo(p2xl[i], p2yl[i])
                     canvas.drawPath(seg_path, seg_paint)
 
-                # Polylines: small in count, vertices iterate.
-                if polys:
+                # Polylines: same per-layer grouping. Small in count.
+                polys_by_layer: Dict[str, List] = {}
+                for poly in polys:
+                    if len(poly.vertices) < 2:
+                        continue
+                    polys_by_layer.setdefault(poly.layer, []).append(poly)
+                for poly_layer, poly_list in polys_by_layer.items():
+                    is_current = (poly_layer == layer)
+                    color_hex = (self.TRACE_HIGHLIGHT if is_current
+                                 else _layer_color(poly_layer, dim=False))
                     poly_paint = _skia.Paint()
-                    poly_paint.setColor(hi_color)
+                    poly_paint.setColor(self._hex_to_skia(color_hex))
                     poly_paint.setStyle(_skia.Paint.Style.kStroke_Style)
                     poly_paint.setStrokeWidth(1.0)
                     poly_paint.setAntiAlias(True)
                     poly_path = _skia.Path()
-                    # Build a single big numpy array of all vertices
-                    # plus a "per-polyline-start" index table so we
-                    # know when to moveTo() vs lineTo().
                     all_vx: List[float] = []
                     all_vy: List[float] = []
-                    breaks: List[int] = []  # indices that start a polyline
-                    for poly in polys:
-                        if poly.layer != layer or len(poly.vertices) < 2:
-                            continue
+                    breaks: List[int] = []
+                    for poly in poly_list:
                         breaks.append(len(all_vx))
                         for vx, vy in poly.vertices:
                             all_vx.append(vx)
                             all_vy.append(vy)
-                    if all_vx:
-                        avx = _np.asarray(all_vx, dtype=_np.float32)
-                        avy = _np.asarray(all_vy, dtype=_np.float32)
-                        psx, psy = self._project_arrays(avx, avy)
-                        psxl = psx.tolist()
-                        psyl = psy.tolist()
-                        breakset = set(breaks)
-                        for i in range(len(psxl)):
-                            if i in breakset:
-                                poly_path.moveTo(psxl[i], psyl[i])
-                            else:
-                                poly_path.lineTo(psxl[i], psyl[i])
-                        canvas.drawPath(poly_path, poly_paint)
+                    if not all_vx:
+                        continue
+                    avx = _np.asarray(all_vx, dtype=_np.float32)
+                    avy = _np.asarray(all_vy, dtype=_np.float32)
+                    psx, psy = self._project_arrays(avx, avy)
+                    psxl = psx.tolist()
+                    psyl = psy.tolist()
+                    breakset = set(breaks)
+                    for i in range(len(psxl)):
+                        if i in breakset:
+                            poly_path.moveTo(psxl[i], psyl[i])
+                        else:
+                            poly_path.lineTo(psxl[i], psyl[i])
+                    canvas.drawPath(poly_path, poly_paint)
 
                 # ---- Phase C: pin-stub auto-completion -----------------
                 # TVW trace polylines terminate at via/pad-edge, not at
@@ -2563,7 +3086,11 @@ if _GL_AVAILABLE:
                         ex_arr = _np.asarray(ex_list, dtype=_np.float32)
                         ey_arr = _np.asarray(ey_list, dtype=_np.float32)
                         stub_paint = _skia.Paint()
-                        stub_paint.setColor(hi_color)
+                        # Pin stubs are *current-layer* only (they bridge
+                        # a current-layer pin to a current-layer segment
+                        # endpoint), so the bright TRACE_HIGHLIGHT colour
+                        # is correct regardless of which layer is in view.
+                        stub_paint.setColor(self._hex_to_skia(self.TRACE_HIGHLIGHT))
                         stub_paint.setStyle(_skia.Paint.Style.kStroke_Style)
                         stub_paint.setStrokeWidth(2.0)
                         stub_paint.setAntiAlias(True)
@@ -2610,19 +3137,46 @@ if _GL_AVAILABLE:
 
         def _draw_status_text(self, canvas, w: int, h: int) -> None:
             zoom_pct = int(self.zoom * 100)
-            n_layer = sum(
-                1 for c in self.board.components.values()
-                if c.layer == self._view_layer
-            )
-            layer_indicator = (
-                "TOP (looking down)" if self._view_layer == "TOP"
-                else "BOTTOM (mirrored, as if board flipped)"
-            )
+            view_is_inner = self._view_layer not in ("TOP", "BOTTOM")
+            if view_is_inner:
+                n_layer = len(self.board.components)
+                layer_indicator = (
+                    f"{self._view_layer} (inner copper, ghost components)"
+                )
+                comp_label = "ghost components"
+            else:
+                n_layer = sum(
+                    1 for c in self.board.components.values()
+                    if c.layer == self._view_layer
+                )
+                layer_indicator = (
+                    "TOP (looking down)" if self._view_layer == "TOP"
+                    else "BOTTOM (mirrored, as if board flipped)"
+                )
+                comp_label = "components on this layer"
+            if not self._measure_mode:
+                hint_extra = "  •  M=measure"
+            else:
+                d = self.measurement_distance_units()
+                d_prev = self.measurement_distance_preview_units()
+                if d is not None:
+                    readout = f"  •  measured: {self._format_distance(d)}"
+                elif d_prev is not None:
+                    readout = (
+                        f"  •  preview: {self._format_distance(d_prev)} "
+                        "(click for 2nd pt)"
+                    )
+                else:
+                    readout = "  •  click first point"
+                hint_extra = (
+                    "  •  measure mode" + readout
+                    + "  •  Esc clears  •  M exits"
+                )
             status = (
-                f"{layer_indicator}  •  {n_layer} components on this layer"
+                f"{layer_indicator}  •  {n_layer} {comp_label}"
                 f"  •  zoom {zoom_pct}%  •  drag to pan, wheel to zoom, "
-                "click an IC, click a pin while selected, L=flip, "
-                "Home=reset"
+                "click an IC, click a pin while selected, L=cycle layer, "
+                "Home=reset" + hint_extra
             )
             paint = _skia.Paint()
             paint.setAntiAlias(True)
@@ -2632,6 +3186,117 @@ if _GL_AVAILABLE:
             # Tk anchor=nw → baseline ≈ asc + offset
             metrics = font.getMetrics()
             canvas.drawTextBlob(blob, 8, 8 - metrics.fAscent, paint)
+
+        def _draw_measurement_overlay_gl(
+            self, canvas, w: int, h: int,
+        ) -> None:
+            """Skia equivalent of BoardCanvasCPU._draw_measurement_overlay.
+            Draws endpoint dots, a halo+colored connecting line, and the
+            distance label with a background pill on top of the GL frame."""
+            MEAS_COLOR = self._hex_to_skia("#ffd24d")
+            MEAS_OUTLINE = self._hex_to_skia("#000000")
+            BG_COLOR = self._hex_to_skia("#1a1a1a")
+            DOT_R = 4.0
+
+            # Compose endpoints: placed pts plus the live hover (if any).
+            endpoints: List[Tuple[float, float]] = list(self._measure_pts)
+            if len(endpoints) == 1 and self._measure_hover is not None:
+                endpoints = endpoints + [self._measure_hover]
+
+            # Endpoint dots — placed pts get filled circles with a black
+            # outline; the hover preview point (drawn separately below)
+            # gets a hollow ring to differentiate.
+            dot_fill = _skia.Paint()
+            dot_fill.setAntiAlias(True)
+            dot_fill.setColor(MEAS_COLOR)
+            dot_fill.setStyle(_skia.Paint.kFill_Style)
+            dot_outline = _skia.Paint()
+            dot_outline.setAntiAlias(True)
+            dot_outline.setColor(MEAS_OUTLINE)
+            dot_outline.setStyle(_skia.Paint.kStroke_Style)
+            dot_outline.setStrokeWidth(1.0)
+            for wxy in self._measure_pts:
+                sx, sy = self._project(wxy[0], wxy[1], w, h)
+                canvas.drawCircle(sx, sy, DOT_R, dot_fill)
+                canvas.drawCircle(sx, sy, DOT_R, dot_outline)
+
+            # Line + label only when we have two endpoints.
+            if len(endpoints) == 2:
+                (x1, y1), (x2, y2) = endpoints
+                sx1, sy1 = self._project(x1, y1, w, h)
+                sx2, sy2 = self._project(x2, y2, w, h)
+                halo = _skia.Paint()
+                halo.setAntiAlias(True)
+                halo.setColor(MEAS_OUTLINE)
+                halo.setStyle(_skia.Paint.kStroke_Style)
+                halo.setStrokeWidth(4.0)
+                halo.setStrokeCap(_skia.Paint.kRound_Cap)
+                line_paint = _skia.Paint()
+                line_paint.setAntiAlias(True)
+                line_paint.setColor(MEAS_COLOR)
+                line_paint.setStyle(_skia.Paint.kStroke_Style)
+                line_paint.setStrokeWidth(2.0)
+                line_paint.setStrokeCap(_skia.Paint.kRound_Cap)
+                canvas.drawLine(sx1, sy1, sx2, sy2, halo)
+                canvas.drawLine(sx1, sy1, sx2, sy2, line_paint)
+
+                # Hover-preview endpoint: hollow ring on top of the line.
+                if len(self._measure_pts) == 1:
+                    preview = _skia.Paint()
+                    preview.setAntiAlias(True)
+                    preview.setColor(MEAS_COLOR)
+                    preview.setStyle(_skia.Paint.kStroke_Style)
+                    preview.setStrokeWidth(2.0)
+                    canvas.drawCircle(sx2, sy2, DOT_R, preview)
+
+                # Label centred on segment midpoint, offset perpendicular.
+                d_units = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+                label = self._format_distance(d_units)
+                mx, my = (sx1 + sx2) / 2, (sy1 + sy2) / 2
+                dx, dy = sx2 - sx1, sy2 - sy1
+                seg_len = max((dx * dx + dy * dy) ** 0.5, 1.0)
+                ox, oy = -dy / seg_len * 14.0, dx / seg_len * 14.0
+                tx, ty = mx + ox, my + oy
+
+                # Measure the text to size the pill.
+                font = self._font_label
+                metrics = font.getMetrics()
+                # Skia text widths via measureText (returns float).
+                text_width = font.measureText(label)
+                ascent = -metrics.fAscent
+                descent = metrics.fDescent
+                pad = 3.0
+                # Place text baseline so the rendered glyph is centered on
+                # (tx, ty); account for ascent/descent asymmetry.
+                text_h = ascent + descent
+                bx0 = tx - text_width / 2 - pad
+                bx1 = tx + text_width / 2 + pad
+                by0 = ty - text_h / 2 - pad
+                by1 = ty + text_h / 2 + pad
+                # Background pill.
+                bg = _skia.Paint()
+                bg.setAntiAlias(True)
+                bg.setColor(BG_COLOR)
+                bg.setStyle(_skia.Paint.kFill_Style)
+                rect = _skia.Rect.MakeLTRB(bx0, by0, bx1, by1)
+                canvas.drawRect(rect, bg)
+                outline = _skia.Paint()
+                outline.setAntiAlias(True)
+                outline.setColor(MEAS_COLOR)
+                outline.setStyle(_skia.Paint.kStroke_Style)
+                outline.setStrokeWidth(1.0)
+                canvas.drawRect(rect, outline)
+                # Label glyphs on top.
+                text_paint = _skia.Paint()
+                text_paint.setAntiAlias(True)
+                text_paint.setColor(MEAS_COLOR)
+                blob = _skia.TextBlob.MakeFromString(label, font)
+                # Baseline is at ty - text_h/2 + ascent (top of the cell
+                # plus the ascent puts us at the baseline).
+                baseline_y = by0 + pad + ascent
+                canvas.drawTextBlob(
+                    blob, tx - text_width / 2, baseline_y, text_paint,
+                )
 
         # ---- input handlers ----------------------------------------------
 
@@ -2686,6 +3351,23 @@ if _GL_AVAILABLE:
                 self._handle_click(event.x, event.y)
 
         def _handle_click(self, cx: int, cy: int) -> None:
+            # Measurement mode short-circuits component selection. Same
+            # semantics as BoardCanvasCPU._handle_click — see that method's
+            # docstring for the three-point capture behaviour.
+            if self._measure_mode:
+                wx, wy = self._unproject(cx, cy)
+                if len(self._measure_pts) >= 2:
+                    self._measure_pts = [(wx, wy)]
+                    self._measure_hover = None
+                else:
+                    self._measure_pts.append((wx, wy))
+                    if len(self._measure_pts) == 2:
+                        self._measure_hover = None
+                self._schedule_redraw()
+                if self._on_measure_change:
+                    self._on_measure_change()
+                return
+
             if self._selected_refdes:
                 comp = self.board.components.get(self._selected_refdes)
                 if comp and comp.layer == self._view_layer:
@@ -2712,6 +3394,87 @@ if _GL_AVAILABLE:
                 if self._on_pin_select:
                     self._on_pin_select(None)
 
+        def _on_motion(self, event: tk.Event) -> None:
+            if not self._measure_mode or len(self._measure_pts) != 1:
+                return
+            wx, wy = self._unproject(event.x, event.y)
+            prev = self._measure_hover
+            if prev is not None:
+                w, h = self.winfo_width(), self.winfo_height()
+                psx, psy = self._project(prev[0], prev[1], w, h)
+                if abs(psx - event.x) < 0.5 and abs(psy - event.y) < 0.5:
+                    return
+            self._measure_hover = (wx, wy)
+            self._schedule_redraw()
+            if self._on_measure_change:
+                self._on_measure_change()
+
+        # ---- Measurement public API (mirrors BoardCanvasCPU) ----
+
+        @property
+        def measure_mode(self) -> bool:
+            return self._measure_mode
+
+        def set_measure_mode(self, on: bool) -> None:
+            if self._measure_mode == on:
+                return
+            self._measure_mode = on
+            self._measure_pts = []
+            self._measure_hover = None
+            self.config(cursor="crosshair" if on else "")
+            self._schedule_redraw()
+            if self._on_measure_change:
+                self._on_measure_change()
+
+        def clear_measurement(self) -> None:
+            if not self._measure_pts and not self._measure_hover:
+                return
+            self._measure_pts = []
+            self._measure_hover = None
+            self._schedule_redraw()
+            if self._on_measure_change:
+                self._on_measure_change()
+
+        def set_measure_change_callback(
+            self, cb: Optional[Callable[[], None]],
+        ) -> None:
+            self._on_measure_change = cb
+
+        def measurement_distance_units(self) -> Optional[float]:
+            if len(self._measure_pts) < 2:
+                return None
+            (x1, y1), (x2, y2) = self._measure_pts[0], self._measure_pts[1]
+            return ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+
+        def measurement_distance_preview_units(self) -> Optional[float]:
+            if len(self._measure_pts) != 1 or self._measure_hover is None:
+                return None
+            (x1, y1) = self._measure_pts[0]
+            x2, y2 = self._measure_hover
+            return ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+
+        def units_per_mm(self) -> float:
+            cached = getattr(self, "_units_per_mm_cache", None)
+            if cached is not None:
+                return cached
+            xs = [c.x for c in self.board.components.values()]
+            ys = [c.y for c in self.board.components.values()]
+            if not xs:
+                scale = 39.37
+            else:
+                span = max(max(xs) - min(xs), max(ys) - min(ys))
+                scale = 3937.0 if span > 50_000 else 39.37
+            self._units_per_mm_cache = scale
+            return scale
+
+        def _format_distance(self, d_units: float) -> str:
+            upm = self.units_per_mm()
+            mm = d_units / upm
+            mil = mm * 39.3701
+            if mm >= 1.0:
+                return f"{mm:.3f} mm  ({mil:.1f} mil)"
+            return f"{mm * 1000:.1f} um  ({mil:.2f} mil)"
+
         def _find_pin_at(
             self, comp: Component, shape: Any, cx: int, cy: int,
         ) -> Optional[str]:
@@ -2734,17 +3497,26 @@ if _GL_AVAILABLE:
             return best_pin
 
         def _find_component_at(self, cx: int, cy: int) -> Optional[str]:
+            # See BoardCanvasCPU._find_component_at for the rationale on
+            # the pin-density weighting — same fix applies here.
             w, h = self.winfo_width(), self.winfo_height()
             candidates = [c for c in self.board.components.values()
                           if c.layer == self._view_layer]
             best_refdes = None
-            best_area = float("inf")
+            best_score = float("inf")
             for c in candidates:
                 poly = self._component_polygon_screen(c, w, h)
                 if poly and self._point_in_poly(cx, cy, poly):
                     area = self._poly_area(poly)
-                    if area < best_area:
-                        best_area = area
+                    shape = self.board.shapes.get(c.shape)
+                    n_pins = len(shape.pins) if shape else 0
+                    if n_pins >= 8:
+                        factor = 1.0
+                    else:
+                        factor = 8.0 / max(1, n_pins)
+                    score = area * factor
+                    if score < best_score:
+                        best_score = score
                         best_refdes = c.refdes
             if best_refdes:
                 return best_refdes
@@ -3441,6 +4213,9 @@ class ViewerApp(tk.Tk):
         self.bind("L", lambda e: self._safe(self._toggle_layer))
         self.bind("t", lambda e: self._safe(self._toggle_traces))
         self.bind("T", lambda e: self._safe(self._toggle_traces))
+        self.bind("m", lambda e: self._safe(self._toggle_measure))
+        self.bind("M", lambda e: self._safe(self._toggle_measure))
+        self.bind("<Escape>", lambda e: self._safe(self._on_escape))
         self.bind("<Control-o>", lambda e: self._menu_open_board())
         self.bind("<Control-O>", lambda e: self._menu_open_board())
         self.bind("<Control-q>", lambda e: self.quit())
@@ -3449,6 +4224,7 @@ class ViewerApp(tk.Tk):
         self.canvas.set_select_callback(self._on_canvas_select)
         self.canvas.set_layer_change_callback(self._on_canvas_layer_change)
         self.canvas.set_pin_select_callback(self._on_canvas_pin_select)
+        self.canvas.set_measure_change_callback(self._update_status)
 
         if board_path:
             _add_recent(board_path)
@@ -3472,7 +4248,21 @@ class ViewerApp(tk.Tk):
 
     def _is_typing(self) -> bool:
         focus = self.focus_get()
-        return isinstance(focus, (tk.Entry, ttk.Entry, tk.Text))
+        if not isinstance(focus, (tk.Entry, ttk.Entry, tk.Text)):
+            return False
+        # ttk.Combobox subclasses ttk.Entry, so the isinstance check above
+        # matches it. In readonly state it doesn't accept typed text — it
+        # only does prefix-match navigation. Single-char shortcuts (L, T,
+        # M) MUST still fire when the layer dropdown has focus, otherwise
+        # users get the "T does nothing after I clicked the dropdown"
+        # symptom on multi-layer boards.
+        if isinstance(focus, ttk.Combobox):
+            try:
+                if str(focus.cget("state")) == "readonly":
+                    return False
+            except tk.TclError:
+                pass
+        return True
 
     def _safe(self, action: Callable[[], None]) -> None:
         if self._is_typing():
@@ -3494,7 +4284,7 @@ class ViewerApp(tk.Tk):
         view_menu = tk.Menu(menubar, tearoff=False)
         view_menu.add_command(label="Reset view (Home)",
                               command=lambda: self.canvas.reset_view())
-        view_menu.add_command(label="Toggle layer (L)",
+        view_menu.add_command(label="Cycle layer (L)",
                               command=self._toggle_layer)
         view_menu.add_command(label="Toggle traces (T)",
                               command=self._toggle_traces)
@@ -3537,10 +4327,25 @@ class ViewerApp(tk.Tk):
         )
         self.net_search.pack(side="left", padx=(0, 12))
 
-        self.layer_btn = ttk.Button(toolbar, text="View: TOP",
-                                    command=self._toggle_layer, width=14)
-        self.layer_btn.pack(side="right", padx=(4, 0))
-        self.traces_btn = ttk.Button(toolbar, text="Traces: ON",
+        # Layer selector. On 2-layer boards (most TVW mobos / all GENCAD /
+        # BRD / XZZ files) only TOP and BOTTOM are listed and the dropdown
+        # is functionally identical to the old toggle button. On multi-
+        # layer boards (GPU PCBs once their topology is built) INNER_1..N
+        # appear too. The values list is rebuilt on layer-change so the
+        # first time the user enables traces and the topology populates
+        # the layer table, the inner layers appear automatically.
+        self.layer_combo = ttk.Combobox(toolbar, state="readonly", width=11,
+                                        values=["TOP", "BOTTOM"])
+        self.layer_combo.set("TOP")
+        self.layer_combo.bind("<<ComboboxSelected>>", self._on_layer_combo_pick)
+        self.layer_combo.pack(side="right", padx=(4, 0))
+        ttk.Label(toolbar, text="Layer:").pack(side="right", padx=(4, 4))
+        # Traces start OFF (canvas builds topology on first enable, which
+        # is a 3-6 s scan we don't want to pay on every load). The button
+        # label is auto-corrected by `_on_traces_change` whenever the
+        # canvas flips state — so it only needs to start matching that
+        # initial OFF state.
+        self.traces_btn = ttk.Button(toolbar, text="Traces: OFF",
                                      command=self._toggle_traces, width=14)
         self.traces_btn.pack(side="right", padx=(4, 0))
         self.reset_btn = ttk.Button(toolbar, text="Reset view",
@@ -3606,10 +4411,11 @@ class ViewerApp(tk.Tk):
         path = filedialog.askopenfilename(
             title="Open boardview",
             filetypes=[
-                ("Boardview", "*.cad *.brd *.brd2 *.bv *.tvw"),
+                ("Boardview", "*.cad *.brd *.brd2 *.bv *.tvw *.pcb"),
                 ("GENCAD", "*.cad"),
                 ("OpenBoardView ASCII", "*.brd *.brd2 *.bv"),
                 ("Teboview", "*.tvw"),
+                ("XZZPCB (MSI / repair shops)", "*.pcb"),
                 ("All files", "*.*"),
             ],
             initialdir=_last_dir() or ".",
@@ -3635,6 +4441,7 @@ class ViewerApp(tk.Tk):
         self.comp_panel.set_board(board)
         self.net_panel.set_board(board)
         self.comp_search.clear()
+        _surface_model_warnings(board, parent=self)
         self.net_search.clear()
         self._rebuild_recent_menu()
         self._update_status()
@@ -3700,7 +4507,14 @@ class ViewerApp(tk.Tk):
         self._update_status()
 
     def _on_canvas_layer_change(self, layer: str) -> None:
-        self.layer_btn.config(text=f"View: {layer}")
+        self._sync_layer_widgets(layer)
+        self._update_status()
+
+    def _on_layer_combo_pick(self, _event=None) -> None:
+        """Toolbar Combobox callback — push selection into the canvas."""
+        new_layer = self.layer_combo.get()
+        if new_layer and new_layer != self.canvas.view_layer:
+            self.canvas.set_view_layer(new_layer)
         self._update_status()
 
     def _on_canvas_pin_select(self, pin: Optional[str]) -> None:
@@ -3718,6 +4532,10 @@ class ViewerApp(tk.Tk):
 
     def _on_traces_change(self, on: bool) -> None:
         self.traces_btn.config(text=f"Traces: {'ON' if on else 'OFF'}")
+        # First trace-enable on a multi-layer board builds the topology,
+        # which is when `_layer_names` becomes readable. Re-sync so the
+        # dropdown picks up newly-available INNER_n entries.
+        self._sync_layer_widgets(self.canvas.view_layer)
 
     # ----- info panels → app callbacks --------------------------------------
 
@@ -3738,14 +4556,62 @@ class ViewerApp(tk.Tk):
     # ----- view menu --------------------------------------------------------
 
     def _toggle_layer(self) -> None:
-        new_layer = "BOTTOM" if self.canvas.view_layer == "TOP" else "TOP"
+        """Cycle through every available layer (TOP, BOTTOM, then any
+        INNER_n that the trace topology has decoded). On 2-layer boards
+        this is just the old TOP↔BOTTOM flip; on multi-layer GPU PCBs
+        it walks through INNER_1, INNER_2, ... after BOTTOM and wraps."""
+        layers = _available_layers_for(self.canvas.board)
+        if not layers:
+            return
+        try:
+            i = layers.index(self.canvas.view_layer)
+        except ValueError:
+            i = -1
+        new_layer = layers[(i + 1) % len(layers)]
         self.canvas.set_view_layer(new_layer)
-        self.layer_btn.config(text=f"View: {new_layer}")
+        self._sync_layer_widgets(new_layer)
         self._update_status()
 
+    def _sync_layer_widgets(self, layer: str) -> None:
+        """Refresh the toolbar layer dropdown / button label after a
+        layer change. Called from both the L-key cycle and any callback
+        path that might mutate `view_layer` (component-pick auto-flip,
+        net-jump auto-flip, board reload)."""
+        if hasattr(self, "layer_combo") and self.layer_combo is not None:
+            layers = _available_layers_for(self.canvas.board)
+            current_values = list(self.layer_combo["values"])
+            if current_values != layers:
+                self.layer_combo["values"] = layers
+            if self.layer_combo.get() != layer:
+                self.layer_combo.set(layer)
+
     def _toggle_traces(self) -> None:
+        # Button text and the layer-dropdown refresh both happen in
+        # `_on_traces_change` (wired via `set_traces_change_callback`),
+        # which the canvas fires after `toggle_traces()` flips state.
+        # No explicit button update needed here — and the previous
+        # explicit version called `show_traces()` which is a @property,
+        # not a method, so it raised TypeError on every press of T.
         self.canvas.toggle_traces()
-        self.traces_btn.config(text=f"Traces: {'ON' if self.canvas.show_traces() else 'OFF'}")
+
+    def _toggle_measure(self) -> None:
+        """Enter or leave measurement mode. Component selection clears
+        on entry so the new mode-cursor is unambiguous; mode exits with
+        another M press or via Esc."""
+        on = not self.canvas.measure_mode
+        if on:
+            # Drop any active component / pin selection so the cursor
+            # change to crosshair is the unambiguous mode signal.
+            self.canvas._selected_refdes = None
+            self.canvas._selected_pin = None
+        self.canvas.set_measure_mode(on)
+        self._update_status()
+
+    def _on_escape(self) -> None:
+        """Esc: in measure mode, clear placed points (mode stays on so
+        the user can immediately start a new measurement); otherwise no-op."""
+        if self.canvas.measure_mode:
+            self.canvas.clear_measurement()
 
     # ----- status / about ---------------------------------------------------
 
@@ -3764,6 +4630,23 @@ class ViewerApp(tk.Tk):
         ]
         if sel:
             bits.append(f"selected: {sel}" + (f" pin {pin}" if pin else ""))
+        # Measurement readout. Three states:
+        #   * mode on, 0 pts placed     -> "measure: click first point"
+        #   * mode on, 1 pt + hover     -> "measure: <distance> (preview)"
+        #   * mode on, 2 pts            -> "measure: <distance>"
+        if self.canvas.measure_mode:
+            d = self.canvas.measurement_distance_units()
+            if d is not None:
+                bits.append(
+                    f"measure: {self.canvas._format_distance(d)}")
+            else:
+                d_prev = self.canvas.measurement_distance_preview_units()
+                if d_prev is not None:
+                    bits.append(
+                        f"measure: {self.canvas._format_distance(d_prev)}"
+                        " (preview)")
+                else:
+                    bits.append("measure: click first point")
         self.status.config(text="   ".join(bits))
 
     def _show_about(self) -> None:
@@ -3774,14 +4657,15 @@ class ViewerApp(tk.Tk):
             "Supported formats:\n"
             "  • GENCAD 1.4   (.cad)\n"
             "  • OpenBoardView ASCII   (.brd / .brd2 / .bv)\n"
-            "  • Teboview   (.tvw)\n",
+            "  • Teboview   (.tvw)\n"
+            "  • XZZPCB V1.0   (.pcb, MSI / repair shops)\n",
         )
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
     ap.add_argument("board", nargs="?",
-                    help="Path to a boardview file (.cad/.brd/.brd2/.bv/.tvw). "
+                    help="Path to a boardview file (.cad/.brd/.brd2/.bv/.tvw/.pcb). "
                          "If omitted you'll be prompted.")
     ap.add_argument("--smoke-test", action="store_true",
                     help="Initialize and exit (no mainloop)")
@@ -3798,7 +4682,7 @@ def main() -> None:
             picked = filedialog.askopenfilename(
                 title="Open boardview",
                 filetypes=[
-                    ("Boardview", "*.cad *.brd *.brd2 *.bv *.tvw"),
+                    ("Boardview", "*.cad *.brd *.brd2 *.bv *.tvw *.pcb"),
                     ("All files", "*.*"),
                 ],
                 initialdir=_last_dir() or ".",
@@ -3824,8 +4708,17 @@ def main() -> None:
         print(f"  nets:         {len(board.signals)}")
         print(f"  pin->net:     {len(app._pin_to_net)} entries")
         print(f"  initial view: {app.canvas.view_layer}")
+        warnings = getattr(board, "warnings", None) or []
+        if warnings:
+            print(f"  parser warnings: {len(warnings)}")
+            for w in warnings:
+                print(f"    - {w}")
         app.destroy()
         return
+    # Defer the warning dialog to after_idle so it appears once the
+    # main window has rendered — popping it before mainloop() makes
+    # it appear on top of an empty window, which looks broken.
+    app.after_idle(lambda: _surface_model_warnings(board, parent=app))
     app.mainloop()
 
 

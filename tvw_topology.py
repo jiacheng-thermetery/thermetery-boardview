@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) 2026 Thermetery Technology LLC
 
-"""TVW connectivity graph — board-level trace topology.
+"""TVW connectivity graph (Phase 2 — board-level trace topology).
 
-Builds a connected-component graph from the geometric primitives the
-binary scanner cracked out of Gigabyte Teboview .tvw files. With this
-graph a tool can ask "starting at U_PCH pin AC3, what other pads are
-reachable through traces and vias?" and get a real answer — useful for
-broken-trace detection or any net-walking workflow.
+Builds a connected-component graph from the geometric primitives that
+the parser already cracked out of Gigabyte Teboview .tvw files. With
+this graph a caller can ask "starting at U_PCH pin AC3, what other pads
+are reachable through traces and vias?" and get a real answer — used
+by the viewer's net-highlight overlay and by `find_broken_nets`.
 
 Inputs the module relies on:
   * `tvw_seg_27_unified_v3` — the 5-pass binary scanner from Phase 1
@@ -90,35 +90,150 @@ from tvw_parser import _find_net_table, _build_net_index
 
 
 # --------------------------------------------------------------------------
-# Region maps. Phase 1 documented these but didn't expose them as data;
-# the four anchor offsets per board are reverse-engineered + verified.
+# Region detection.
+#
+# A "trace-data region" is one copper layer's worth of pad / segment /
+# polyline records. Two-layer mobos have two regions (TOP, BOTTOM);
+# 8-12 layer GPU PCBs have one per layer. Each region begins at a
+# Custom_NN Pascal-prefixed header and runs until the next Custom_NN
+# header — header-to-header gaps for genuine layer regions are several
+# hundred KB to several MB, while the file's outer Custom_NN frame
+# (component / footprint / metadata clusters before and after the
+# layers) has gaps of only a few hundred bytes. That gap separation
+# (three orders of magnitude) is what auto-detection keys on.
+#
+# Until 2026-05, we shipped a hand-curated KNOWN_BOARDS list keyed by
+# filename to hard-coded (top_start, top_end, bot_start, bot_end)
+# tuples for the three reference mobos. The list was a stopgap from
+# before auto-detect existed: cross-checked end-to-end on Z490 / X570
+# / B550, the auto-detected regions are bit-identical to those tuples
+# after the standard `nt_start` trim — so the hand-curated entries
+# were vestigial. Dropped the list entirely; `_board_regions_for`
+# always auto-detects.
 # --------------------------------------------------------------------------
 
-# Each tuple: (label, file_path, top_start, top_end, bot_start, bot_end).
-# top_*  -> Custom_35 / Custom_21 / Custom_26  (TOP trace data)
-# bot_*  -> the 2nd Custom_17 occurrence (BOTTOM trace data)
-KNOWN_BOARDS: List[Tuple[str, str, int, int, int, int]] = [
-    ("Z490", "C:/Claude Code/Z490 VISION G r1.0.tvw",
-     8_528, 4_761_170, 4_761_926, 6_625_913),
-    ("X570", "C:/Claude Code/Gigabyte_X570_GAMING_X_REV1.01.tvw",
-     4_754, 1_838_204, 1_839_968, 3_236_212),
-    ("B550", "C:/Claude Code/B550_AORUS_PRO_AC_REV1.0.tvw",
-     6_474, 3_978_556, 3_980_816, 5_493_511),
-]
+# Auto-detect threshold. A trace-data region is a Custom_NN header followed
+# by a gap >= this many bytes before the next Custom_NN. Header-only blocks
+# have gaps in the 100-1000 B range; real layer regions on the smallest
+# board we tested (X570) are ~1.4 MB. 50 KB sits ~30x above the largest
+# header gap we've ever seen and ~30x below the smallest layer region —
+# safe with three orders of magnitude of slack.
+_LAYER_REGION_MIN_GAP = 50_000
 
 
-def _board_regions_for(path: str) -> Tuple[Tuple[int, int], Tuple[int, int]]:
-    """Return ((top_start, top_end), (bot_start, bot_end)) for `path`.
-    Falls back to None if path doesn't match a known board."""
-    p_norm = path.replace("\\", "/")
-    for _label, kp, ts, te, bs, be in KNOWN_BOARDS:
-        if kp.replace("\\", "/").lower().endswith(
-                p_norm.lower().split("/")[-1]):
-            return ((ts, te), (bs, be))
-    raise ValueError(
-        f"Unknown board file: {path}. Add an entry to KNOWN_BOARDS in "
-        f"tvw_topology.py with the TOP and BOTTOM Custom_NN region offsets "
-        f"(use tvw_customs.py to find them).")
+def _scan_custom_headers(buf: bytes) -> List[Tuple[int, str]]:
+    """Find every "Custom_NN" Pascal-prefixed string in `buf`.
+
+    A Pascal-prefixed string is one byte of length L followed by L bytes
+    of ASCII payload. We accept payloads 8..14 chars long that start
+    with "Custom_" — that's the full Custom_NN header set Gigabyte ever
+    emits. Returns [(offset_of_length_byte, payload_string), ...].
+
+    Inlined here (rather than importing from a `tvw_explore` diagnostic
+    module) so this file stays self-contained for the boardviewer
+    distribution.
+    """
+    out: List[Tuple[int, str]] = []
+    n = len(buf)
+    i = 0
+    MIN_L, MAX_L = 8, 14  # "Custom_NN" payloads are 9-14 chars long
+    while i < n - 1:
+        L = buf[i]
+        if MIN_L <= L <= MAX_L and i + 1 + L <= n:
+            s = buf[i + 1:i + 1 + L]
+            # Cheap printable-ASCII gate before the substring check
+            if all(0x20 <= b < 0x7F for b in s) and s.startswith(b"Custom_"):
+                out.append((i, s.decode('latin-1')))
+                i += 1 + L
+                continue
+        i += 1
+    return out
+
+
+def _autodetect_layer_regions(buf: bytes) -> List[Tuple[int, int]]:
+    """Find each per-copper-layer trace region in a Gigabyte .tvw file.
+
+    Algorithm: scan all Custom_NN Pascal-prefixed headers, pick those
+    followed by a gap >= `_LAYER_REGION_MIN_GAP`. Each chosen header
+    yields (start, end) where `start` is the header's offset and `end`
+    is the next header's offset (or EOF for the final one).
+
+    Returns regions in file order, which means region[0] is the
+    OUTERMOST top copper and region[-1] is the OUTERMOST bottom copper.
+    Anything in between is an inner copper layer (signal or plane).
+    Caller is expected to apply the net-table upper-bound trim
+    afterwards (regions starting at or past `nt_start` are metadata
+    clusters that should be dropped; regions straddling it should
+    be capped).
+    """
+    customs = _scan_custom_headers(buf)
+    customs.sort(key=lambda x: x[0])
+    n = len(buf)
+    regions: List[Tuple[int, int]] = []
+    for i, (off, _name) in enumerate(customs):
+        next_off = customs[i + 1][0] if i + 1 < len(customs) else n
+        if (next_off - off) >= _LAYER_REGION_MIN_GAP:
+            regions.append((off, next_off))
+    return regions
+
+
+def _board_regions_for(
+    path: str,
+    buf: Optional[bytes] = None,
+) -> List[Tuple[int, int]]:
+    """Return the per-layer trace regions for `path`, in file order.
+
+    Length 2 for two-layer mobos (TOP, BOTTOM); length N for N-layer
+    boards (e.g. ~10 for GPU PCBs). Region detection is purely
+    structural — it walks Custom_NN headers and picks ones followed by
+    a >= `_LAYER_REGION_MIN_GAP` payload gap. No filename heuristics,
+    no per-board overrides.
+    """
+    if buf is None:
+        buf = Path(path).read_bytes()
+    regions = _autodetect_layer_regions(buf)
+    if not regions:
+        raise ValueError(
+            f"No trace-data regions detected in {path}. The file may not be "
+            f"a Gigabyte Teboview .tvw, or its Custom_NN structure is "
+            f"unfamiliar (no header is followed by a >= "
+            f"{_LAYER_REGION_MIN_GAP:,}-byte gap). Run tvw_customs.py on "
+            f"the file to inspect its macro structure.")
+    return regions
+
+
+def _layer_names_for_regions(n_regions: int) -> List[str]:
+    """Pick the `layer` string each region's records will carry.
+
+    Convention: byte 0 = TOP (first region), byte 1 = BOTTOM (last
+    region), bytes 2..N-1 = INNER_1..INNER_{N-2} (intermediate regions
+    in file order). This keeps byte 0/1 stable so the C-side via stitch
+    in tvw_native.dll (which hardcodes LAYER_TOP=0 / LAYER_BOTTOM=1)
+    keeps doing the right thing for the outer copper without a recompile.
+    Inner-layer pads still get unique bytes 2..N-1 for spatial-hash
+    keying; cross-stitching inner-to-inner vias is a follow-up that
+    needs a DLL change.
+    """
+    if n_regions <= 0:
+        return []
+    if n_regions == 1:
+        return ["TOP"]
+    names = ["TOP", "BOTTOM"]
+    for i in range(1, n_regions - 1):
+        names.append(f"INNER_{i}")
+    return names
+
+
+def _layer_byte_for_region(region_index: int, n_regions: int) -> int:
+    """Map file-order region index -> layer_byte. See `_layer_names_for_regions`
+    docstring for the convention. Returns 0 for region 0 (TOP), 1 for
+    region n-1 (BOTTOM), and 2..n-1 for intermediate regions in file order."""
+    if region_index == 0:
+        return 0
+    if region_index == n_regions - 1:
+        return 1
+    # Intermediate region i (1..n-2) -> byte i+1 (2..n-1)
+    return region_index + 1
 
 
 # --------------------------------------------------------------------------
@@ -182,6 +297,15 @@ def _scan_pads_stride_aware(
     — the prior approach of scanning pads in leftover gaps misses ~50 %
     of pads because polyline scanners falsely claim their bytes first.
     """
+    # Native fast path — ~60× speedup. See tvw_native.c.
+    try:
+        from tvw_native import scan_pads_stride_aware as _nat_scan_pads
+        result = _nat_scan_pads(buf, region_start, region_end,
+                                min_run=3, coord_max=2_000_000)
+        if result is not None:
+            return result
+    except Exception:
+        pass
     n = region_end
     runs: List[Tuple[int, int, int, int]] = []
     # Coord bound — any real trace coord on a motherboard is well under 2M
@@ -244,9 +368,15 @@ def _extract_layer_records(
     next_pad_id: int,
     next_seg_id: int,
     next_poly_id: int,
+    layer_byte: Optional[int] = None,
 ) -> Tuple[List[Pad], List[Segment], List[Polyline], int, int, int]:
     """Run a 5-pass scan over [region_start, region_end), then decode
     each found block/run into Pad/Segment/Polyline records.
+
+    `layer_byte` is the small-integer index this region's records carry
+    in the per-layer numpy arrays. If None we fall back to the legacy
+    2-layer mapping (TOP=0, anything-else=1) so existing callers keep
+    working.
 
     Pass order matters. Phase 1's reference scanner runs polyline blocks
     first, but that loses many pads to false-positive polyline claims.
@@ -258,10 +388,32 @@ def _extract_layer_records(
     Returns (pads, segments, polylines, next_pad_id, next_seg_id,
     next_poly_id) so the caller can keep ID counters monotonic across
     layers.
+
+    Internally, scan output is held as numpy arrays per run / block /
+    chain so that the post-pass filter can apply a single numpy mask
+    against ~hundreds-of-K records rather than calling a Python helper
+    per record. Dataclass instances (`Pad` / `Segment` / `Polyline`) are
+    constructed AFTER filtering, with positional args (~2× faster than
+    keyword args), via a single bulk list comprehension.
     """
-    pads: List[Pad] = []
-    segments: List[Segment] = []
-    polylines: List[Polyline] = []
+    # Accumulate per-run numpy arrays; concat at the end. Each entry is
+    # a (count,) int32 / int64 array slice extracted from the file.
+    pad_xs_chunks: List[Any] = []
+    pad_ys_chunks: List[Any] = []
+    pad_nets_chunks: List[Any] = []
+    pad_types_chunks: List[Any] = []
+    pad_strides_chunks: List[Any] = []
+    seg_x1_chunks: List[Any] = []
+    seg_y1_chunks: List[Any] = []
+    seg_x2_chunks: List[Any] = []
+    seg_y2_chunks: List[Any] = []
+    seg_nets_chunks: List[Any] = []
+    seg_widths_chunks: List[Any] = []
+    # Polylines remain a Python list of (verts, net_id) — they have
+    # variable-length vertex arrays so they don't pack into a flat
+    # structured array as cleanly. Filter and dataclass-build is done
+    # with the same logic at the end, but per-poly.
+    poly_records: List[Tuple[Any, Any, int]] = []  # (xs_arr, ys_arr, net_id)
 
     # Pass 1: pad runs (38- or 54-byte) FIRST. See note above on order.
     # NOTE on coordinate normalisation: TVW pads, segments AND polylines
@@ -279,29 +431,24 @@ def _extract_layer_records(
         else:  # 54
             net_off, pad_type_off, y_off, x_off = 38, 42, 46, 50
         # Vectorised decode: read the run as a (count, stride) byte array,
-        # slice each i32 field, view as int32 and tolist() for cheap
-        # native-int extraction. Fields aren't 4-byte aligned within
-        # stride=38 records so a direct .view() would fail; we copy each
-        # 4-byte column before viewing. Total alloc per field is ~count*4
-        # bytes (~180 KB for 45 k pads × 4 fields) — well below the
-        # ~50 ms saved per layer.
+        # slice each i32 field, view as int32. We KEEP the numpy arrays
+        # (no .tolist()) so the downstream filter can mask them in one
+        # numpy call instead of a per-record Python loop. Fields aren't
+        # 4-byte aligned within stride=38 records so a direct .view()
+        # would fail; we copy each 4-byte column before viewing.
         run_bytes = np.frombuffer(buf, dtype=np.uint8,
                                   count=count * stride, offset=run_s)
         rec = run_bytes.reshape(count, stride)
-        net_ids = (rec[:, net_off:net_off+4]
-                   .copy().view(np.uint32).reshape(-1).tolist())
-        pad_types = (rec[:, pad_type_off:pad_type_off+4]
-                     .copy().view(np.uint32).reshape(-1).tolist())
-        ys = (rec[:, y_off:y_off+4]
-              .copy().view(np.int32).reshape(-1).tolist())
-        xs = (rec[:, x_off:x_off+4]
-              .copy().view(np.int32).reshape(-1).tolist())
-        for k in range(count):
-            pads.append(Pad(
-                pad_id=next_pad_id, x=xs[k], y=ys[k], net_id=net_ids[k],
-                layer=layer, pad_type=pad_types[k], stride=stride,
-            ))
-            next_pad_id += 1
+        pad_nets_chunks.append(
+            rec[:, net_off:net_off+4].copy().view(np.uint32).reshape(-1))
+        pad_types_chunks.append(
+            rec[:, pad_type_off:pad_type_off+4].copy()
+                .view(np.uint32).reshape(-1))
+        pad_ys_chunks.append(
+            rec[:, y_off:y_off+4].copy().view(np.int32).reshape(-1))
+        pad_xs_chunks.append(
+            rec[:, x_off:x_off+4].copy().view(np.int32).reshape(-1))
+        pad_strides_chunks.append(np.full(count, stride, dtype=np.int32))
         pad_intervals.append((run_s, run_e))
 
     # Pass 2: polyline blocks ([count][type=1] framed) in the gaps left
@@ -313,31 +460,22 @@ def _extract_layer_records(
     for gs, ge in gaps:
         blocks = find_polyline_blocks(buf, gs, ge)
         for start_off, count, end_off in blocks:
-            # Walk the polylines inside this block (separated by 4 zero bytes).
             cur = start_off + 8
             first = True
             for _ in range(count):
                 if not first:
                     cur += 4
                 K = struct.unpack_from('<I', buf, cur)[0]
-                # Vectorised vertex decode: K pairs of (Y, X) i32 starting
-                # at cur+4. Read once as int32, reshape to (K, 2), swap
-                # columns to canonical (x, y), tolist for cheap tuple
-                # building. Saves 2K unpack_from calls per polyline; with
-                # ~6 k polys averaging 50 verts that's ~600 K calls → ~80 ms.
                 verts_arr = np.frombuffer(
                     buf, dtype=np.int32,
                     count=K * 2, offset=cur + 4).reshape(K, 2)
-                ys_l = verts_arr[:, 0].tolist()
-                xs_l = verts_arr[:, 1].tolist()
-                verts = list(zip(xs_l, ys_l))
-                # Polyline blocks don't carry a per-polyline net_id —
-                # propagation resolves via shared endpoints.
-                polylines.append(Polyline(
-                    poly_id=next_poly_id, vertices=verts,
-                    net_id=0, layer=layer,
-                ))
-                next_poly_id += 1
+                # Keep raw int32 arrays for ys / xs; the dataclass
+                # build at the end of the pass turns them into the
+                # vertices list using `zip` which numpy handles cheaply.
+                poly_records.append(
+                    (verts_arr[:, 1].copy(),  # xs
+                     verts_arr[:, 0].copy(),  # ys
+                     0))
                 cur += 4 + K * 8
                 first = False
             blocks_intervals.append((start_off, end_off))
@@ -348,17 +486,13 @@ def _extract_layer_records(
     tagged_intervals: List[Tuple[int, int]] = []
     for gs, ge in gaps:
         for off, net_id, K in find_tagged_polylines_in_gap(buf, gs, ge):
-            # Same Y,X swap as the block path; vertices start at off+8.
             verts_arr = np.frombuffer(
                 buf, dtype=np.int32,
                 count=K * 2, offset=off + 8).reshape(K, 2)
-            ys_l = verts_arr[:, 0].tolist()
-            xs_l = verts_arr[:, 1].tolist()
-            polylines.append(Polyline(
-                poly_id=next_poly_id, vertices=list(zip(xs_l, ys_l)),
-                net_id=net_id, layer=layer,
-            ))
-            next_poly_id += 1
+            poly_records.append(
+                (verts_arr[:, 1].copy(),
+                 verts_arr[:, 0].copy(),
+                 net_id))
             tagged_intervals.append((off, off + 8 + K * 8 + 4))
 
     # Pass 4: trace segments (24-byte). The on-disk layout is documented
@@ -374,26 +508,19 @@ def _extract_layer_records(
         for run_s, run_e, _cnt in find_segments_in_gap(
                 buf, gs, ge, allow_zero_net=True):
             # Vectorised: 24-byte stride is 4-byte-aligned, so we can
-            # frombuffer-as-int32 directly and reshape to (n, 6). Columns
-            # are net_id (u32 reinterpreted as i32 — fine for 0..3999),
-            # K, then (Y1, X1, Y2, X2) which we swap into (x1, y1, x2, y2)
-            # at construction.
+            # frombuffer-as-int32 directly and reshape to (n, 6). Keep
+            # everything as numpy arrays — the post-pass filter masks
+            # them all in one numpy call.
             n_segs = (run_e - run_s) // 24
             arr = np.frombuffer(buf, dtype=np.int32,
-                                count=n_segs * 6, offset=run_s).reshape(n_segs, 6)
-            net_ids = arr[:, 0].tolist()
-            widths = arr[:, 1].tolist()
-            y1s = arr[:, 2].tolist()
-            x1s = arr[:, 3].tolist()
-            y2s = arr[:, 4].tolist()
-            x2s = arr[:, 5].tolist()
-            for k in range(n_segs):
-                segments.append(Segment(
-                    seg_id=next_seg_id,
-                    x1=x1s[k], y1=y1s[k], x2=x2s[k], y2=y2s[k],
-                    net_id=net_ids[k], layer=layer, width=widths[k],
-                ))
-                next_seg_id += 1
+                                count=n_segs * 6, offset=run_s
+                                ).reshape(n_segs, 6).copy()
+            seg_nets_chunks.append(arr[:, 0].view(np.uint32))
+            seg_widths_chunks.append(arr[:, 1])
+            seg_y1_chunks.append(arr[:, 2])
+            seg_x1_chunks.append(arr[:, 3])
+            seg_y2_chunks.append(arr[:, 4])
+            seg_x2_chunks.append(arr[:, 5])
             seg_intervals.append((run_s, run_e))
 
     # Pass 5: polyline chains (X570-style bare chains). Same Y,X swap.
@@ -411,13 +538,10 @@ def _extract_layer_records(
                 verts_arr = np.frombuffer(
                     buf, dtype=np.int32,
                     count=K * 2, offset=cur + 4).reshape(K, 2)
-                ys_l = verts_arr[:, 0].tolist()
-                xs_l = verts_arr[:, 1].tolist()
-                polylines.append(Polyline(
-                    poly_id=next_poly_id, vertices=list(zip(xs_l, ys_l)),
-                    net_id=0, layer=layer,
-                ))
-                next_poly_id += 1
+                poly_records.append(
+                    (verts_arr[:, 1].copy(),
+                     verts_arr[:, 0].copy(),
+                     0))
                 cur += 4 + K * 8
                 if cur + 4 <= chain_e and buf[cur:cur+4] == b'\x00\x00\x00\x00':
                     cur += 4
@@ -464,33 +588,99 @@ def _extract_layer_records(
     # 240 mm "traces" that cross the whole board). The Phase-1 scanner
     # default of 1,000,000 (~320 mm) is too lenient.
     SEG_LEN_MAX_SQ = 500_000 * 500_000
-    def _on_axis(x: int, y: int) -> bool:
-        # Point is suspicious when EITHER coord is within AXIS_EPSILON of 0.
-        # This catches:
-        #   * (0, 0) — Family A round apertures, real screw-hole pads
-        #   * (0, 1) / (1, 0) / (0, 3) — Family A oval/special apertures
-        #   * (1, V) — Family C dimension records (constant prefix produces
-        #             X1=1 in misaligned reads; V is an aperture dim like
-        #             5900, 11800)
-        #   * (V, 1) — symmetric Family D variant
-        # Real PCB trace endpoints are never within ~3 µm of either axis.
-        # The X axis at Y=0 and the Y axis at X=0 pass through the MH1
-        # mounting hole, not through any signal traces.
-        return abs(x) <= AXIS_EPSILON or abs(y) <= AXIS_EPSILON
-    filtered_polylines = [
-        p for p in polylines
-        if all(abs(vx) <= COORD_MAX and abs(vy) <= COORD_MAX
-               for vx, vy in p.vertices)
-        and not any(_on_axis(vx, vy) for vx, vy in p.vertices)
-    ]
-    filtered_segments = [
-        s for s in segments
-        if not _on_axis(s.x1, s.y1) and not _on_axis(s.x2, s.y2)
-        and (s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2 <= SEG_LEN_MAX_SQ
-    ]
-    filtered_pads = [p for p in pads if not _on_axis(p.x, p.y)]
-    return (filtered_pads, filtered_segments, filtered_polylines,
-            next_pad_id, next_seg_id, next_poly_id)
+
+    # Resolve the layer byte once. Default keeps the legacy 2-layer
+    # mapping (TOP=0, anything-else=1) for callers that haven't been
+    # updated to pass it explicitly.
+    if layer_byte is None:
+        layer_byte = 0 if layer == "TOP" else 1
+
+    # ---- Pad filter (numpy mask, no dataclass construction) -----------
+    pad_arrays = None
+    if pad_xs_chunks:
+        all_x = np.concatenate(pad_xs_chunks).astype(np.int32, copy=False)
+        all_y = np.concatenate(pad_ys_chunks).astype(np.int32, copy=False)
+        all_n = np.concatenate(pad_nets_chunks).astype(np.int32, copy=False)
+        all_t = np.concatenate(pad_types_chunks).astype(np.int32, copy=False)
+        all_s = np.concatenate(pad_strides_chunks).astype(np.int32, copy=False)
+        keep = (np.abs(all_x) > AXIS_EPSILON) & (np.abs(all_y) > AXIS_EPSILON)
+        n_kept = int(np.count_nonzero(keep))
+        # Per-pad ids — contiguous starting from next_pad_id. Advance
+        # the caller's counter by the UNFILTERED count so cross-layer
+        # ids stay collision-free even if filter drops different
+        # numbers per layer (matches pre-refactor behaviour the Phase 3
+        # spatial assertions depend on).
+        pad_arrays = {
+            "x":        all_x[keep],
+            "y":        all_y[keep],
+            "net_id":   all_n[keep],
+            "pad_type": all_t[keep],
+            "stride":   all_s[keep],
+            "pad_id":   np.arange(next_pad_id, next_pad_id + n_kept,
+                                   dtype=np.int32),
+            "layer_byte": layer_byte,
+        }
+        next_pad_id += int(all_x.shape[0])
+
+    # ---- Segment filter (numpy mask, no dataclass construction) ------
+    seg_arrays = None
+    if seg_x1_chunks:
+        all_x1 = np.concatenate(seg_x1_chunks).astype(np.int32, copy=False)
+        all_y1 = np.concatenate(seg_y1_chunks).astype(np.int32, copy=False)
+        all_x2 = np.concatenate(seg_x2_chunks).astype(np.int32, copy=False)
+        all_y2 = np.concatenate(seg_y2_chunks).astype(np.int32, copy=False)
+        all_sn = np.concatenate(seg_nets_chunks).astype(np.int32, copy=False)
+        all_sw = np.concatenate(seg_widths_chunks).astype(np.int32, copy=False)
+        dx = all_x2.astype(np.int64) - all_x1.astype(np.int64)
+        dy = all_y2.astype(np.int64) - all_y1.astype(np.int64)
+        keep = (
+            (np.abs(all_x1) > AXIS_EPSILON) & (np.abs(all_y1) > AXIS_EPSILON)
+            & (np.abs(all_x2) > AXIS_EPSILON) & (np.abs(all_y2) > AXIS_EPSILON)
+            & (dx * dx + dy * dy <= SEG_LEN_MAX_SQ)
+        )
+        n_kept = int(np.count_nonzero(keep))
+        seg_arrays = {
+            "x1":     all_x1[keep],
+            "y1":     all_y1[keep],
+            "x2":     all_x2[keep],
+            "y2":     all_y2[keep],
+            "net_id": all_sn[keep],
+            "width":  all_sw[keep],
+            "seg_id": np.arange(next_seg_id, next_seg_id + n_kept,
+                                 dtype=np.int32),
+            "layer_byte": layer_byte,
+        }
+        next_seg_id += int(all_x1.shape[0])
+
+    # ---- Polyline filter (per-poly Python loop; varying vert counts) -
+    # Output is a list of (xs_arr, ys_arr, net_id, poly_id, layer_byte)
+    # tuples — variable-length verts make a single packed array
+    # unwieldy.
+    poly_arrays = None
+    if poly_records:
+        kept_polys: List[Tuple[Any, Any, int]] = []
+        for xs_arr, ys_arr, net_id in poly_records:
+            if (np.abs(xs_arr) > COORD_MAX).any() or \
+                    (np.abs(ys_arr) > COORD_MAX).any():
+                continue
+            if (np.abs(xs_arr) <= AXIS_EPSILON).any() or \
+                    (np.abs(ys_arr) <= AXIS_EPSILON).any():
+                continue
+            kept_polys.append((xs_arr, ys_arr, net_id))
+        poly_arrays = {
+            "kept": kept_polys,
+            "poly_id_start": next_poly_id,
+            "n_kept": len(kept_polys),
+            "layer_byte": layer_byte,
+        }
+        next_poly_id += len(poly_records)
+
+    # NOTE: we no longer build Pad / Segment / Polyline dataclass
+    # instances here. The caller stashes the arrays on TraceGraph; the
+    # dataclass lists are materialised lazily on first .pads/.segments/
+    # .polylines access.
+    return (next_pad_id, next_seg_id, next_poly_id,
+            pad_arrays, seg_arrays, poly_arrays)
 
 
 # --------------------------------------------------------------------------
@@ -578,8 +768,19 @@ class UnionFind:
 class TraceGraph:
     """Connectivity graph for one TVW board file.
 
+    Storage is **numpy-first**. The canonical record state lives in
+    `_pad_arrays` / `_seg_arrays` / `_poly_records` (typed numpy arrays
+    + Python list of variable-length polyline vertex pairs). The legacy
+    `pads` / `segments` / `polylines` accessors are now lazy properties
+    that materialise `Pad` / `Segment` / `Polyline` dataclass instances
+    only when a consumer iterates them — typical hot paths
+    (`find_broken_nets`, viewer trace rendering, `geometry_on_net`)
+    have been converted to read directly from the arrays and never
+    trigger materialisation.
+
     Public attributes:
-        pads, segments, polylines : the typed records (lists).
+        pads, segments, polylines : iterables of typed records,
+                                     materialised lazily from arrays.
         net_names                  : index → name (e.g. net_names[42] = 'GND').
         node_count                 : number of unique endpoints in the graph.
         endpoint_tol, via_tol      : the tolerances used (preserved for
@@ -597,10 +798,32 @@ class TraceGraph:
         _poly_nodes    : poly_id → list[node_id] for each vertex.
         _pad_node      : pad_id → node_id (the fused endpoint at the pad).
         _spatial       : SpatialHash for net_at queries.
+        _pad_arrays    : dict of int32/uint8 numpy arrays for pads
+                          (x, y, net_id, pad_id, layer, pad_type, stride)
+                          OR None on cache-loaded graphs that never had
+                          arrays attached.
+        _seg_arrays    : same shape for segments (x1, y1, x2, y2,
+                          net_id, seg_id, layer, width).
+        _poly_records  : list of (xs_arr, ys_arr, net_id, poly_id,
+                          layer_byte). Variable-length verts make a
+                          single packed array unwieldy for polylines.
     """
-    pads: List[Pad] = field(default_factory=list)
-    segments: List[Segment] = field(default_factory=list)
-    polylines: List[Polyline] = field(default_factory=list)
+    # Numpy storage (canonical). Populated by _extract_layer_records via
+    # the from_file flow, or rehydrated by cache load.
+    _pad_arrays: Optional[Dict[str, Any]] = field(
+        default=None, repr=False, compare=False)
+    _seg_arrays: Optional[Dict[str, Any]] = field(
+        default=None, repr=False, compare=False)
+    _poly_records: List[Any] = field(
+        default_factory=list, repr=False, compare=False)
+    # Lazy dataclass-list caches. None until first .pads/.segments/.polylines
+    # access materialises them.
+    _pads_cache: Optional[List[Pad]] = field(
+        default=None, repr=False, compare=False)
+    _segs_cache: Optional[List[Segment]] = field(
+        default=None, repr=False, compare=False)
+    _polys_cache: Optional[List[Polyline]] = field(
+        default=None, repr=False, compare=False)
     net_names: List[str] = field(default_factory=list)
 
     endpoint_tol: int = 50
@@ -635,6 +858,18 @@ class TraceGraph:
     # "untagged". Auto-detected from net_names[0].
     _zero_is_real_net: bool = False
 
+    # Layer-byte -> layer-name map. Default is the legacy 2-layer mapping
+    # (matches what `_materialize_*` and `_build_native` used to hardcode).
+    # `from_file` overwrites this with the actual layer count detected for
+    # this board: 2 entries for mobos, ~10 for GPU PCBs. Index 0 is always
+    # outermost-top, index 1 is always outermost-bottom; indices 2..N-1 are
+    # inner layers in file order. The byte == 0 / byte == 1 invariant is
+    # what tvw_native.dll's via stitcher relies on, so it must hold for any
+    # board count (which is why bytes 2..N-1 carry inner layers, not
+    # bytes 1..N-2).
+    _layer_names: List[str] = field(
+        default_factory=lambda: ["TOP", "BOTTOM"])
+
     # Diagnostics filled in during build.
     propagation_changes: int = 0
     propagation_conflicts: int = 0
@@ -665,7 +900,106 @@ class TraceGraph:
     #     scanner default) to 200,000 (~64 mm). Real PCB segments are at
     #     most ~50 mm; longer "segments" are Family B int fields satisfying
     #     segment validation by chance, producing 240 mm fake traces.
-    _CACHE_VERSION = 7
+    # v8: TraceGraph storage refactor — `pads`/`segments`/`polylines`
+    #     are now @property accessors backed by `_pad_arrays`/
+    #     `_seg_arrays`/`_poly_records` numpy structures plus lazy
+    #     `_pads_cache`/`_segs_cache`/`_polys_cache` materialisation.
+    #     Old v7 pickles were dumped with the dataclass-field layout
+    #     and will not unpickle into the new field set; force rebuild.
+    # v9: N-layer support — TraceGraph now carries `_layer_names` and
+    #     records' layer_byte indexes into it. For 2-layer mobos this is
+    #     ["TOP", "BOTTOM"] (matches v8 behaviour). For boards with
+    #     more layers (e.g. GPU PCBs) it's ["TOP", "BOTTOM", "INNER_1",
+    #     "INNER_2", ...]. v8 caches lacked the field and would unpickle
+    #     missing it; force rebuild so the field gets populated.
+    _CACHE_VERSION = 9
+
+    # ---- lazy dataclass-list accessors ----------------------------------
+    # These build Pad / Segment / Polyline instances on first access from
+    # the canonical numpy storage. Hot consumers (find_broken_nets, viewer
+    # trace render, geometry_on_net) read from `_pad_arrays`/`_seg_arrays`/
+    # `_poly_records` directly and never trigger materialisation.
+
+    @property
+    def pads(self) -> List[Pad]:
+        if self._pads_cache is None:
+            self._pads_cache = self._materialize_pads()
+        return self._pads_cache
+
+    @pads.setter
+    def pads(self, value: List[Pad]) -> None:
+        # External callers (cache load, gencad_parser) set the list
+        # directly; the next .pads access just returns it. We don't
+        # backfill _pad_arrays from this — set _pad_arrays explicitly
+        # if you want the fast path.
+        self._pads_cache = list(value) if value is not None else []
+
+    @property
+    def segments(self) -> List[Segment]:
+        if self._segs_cache is None:
+            self._segs_cache = self._materialize_segments()
+        return self._segs_cache
+
+    @segments.setter
+    def segments(self, value: List[Segment]) -> None:
+        self._segs_cache = list(value) if value is not None else []
+
+    @property
+    def polylines(self) -> List[Polyline]:
+        if self._polys_cache is None:
+            self._polys_cache = self._materialize_polylines()
+        return self._polys_cache
+
+    @polylines.setter
+    def polylines(self, value: List[Polyline]) -> None:
+        self._polys_cache = list(value) if value is not None else []
+
+    def _materialize_pads(self) -> List[Pad]:
+        """Build Pad instances from `_pad_arrays`. ~25 ms / 50 K records.
+        Returns [] if no arrays are present (e.g. legacy cache load
+        already populated `_pads_cache` and we never get here)."""
+        a = self._pad_arrays
+        if not a:
+            return []
+        x = a["x"].tolist();      y = a["y"].tolist()
+        net = a["net_id"].tolist(); pid = a["pad_id"].tolist()
+        layer = a["layer"].tolist()
+        ptype = a["pad_type"].tolist() if "pad_type" in a else [0] * len(x)
+        stride = a["stride"].tolist() if "stride" in a else [38] * len(x)
+        layer_str = self._layer_names
+        return [
+            Pad(pid[i], x[i], y[i], net[i], layer_str[layer[i]],
+                ptype[i], stride[i])
+            for i in range(len(x))
+        ]
+
+    def _materialize_segments(self) -> List[Segment]:
+        a = self._seg_arrays
+        if not a:
+            return []
+        x1 = a["x1"].tolist(); y1 = a["y1"].tolist()
+        x2 = a["x2"].tolist(); y2 = a["y2"].tolist()
+        net = a["net_id"].tolist(); sid = a["seg_id"].tolist()
+        layer = a["layer"].tolist()
+        width = a["width"].tolist() if "width" in a else [0] * len(x1)
+        layer_str = self._layer_names
+        return [
+            Segment(sid[i], x1[i], y1[i], x2[i], y2[i],
+                    net[i], layer_str[layer[i]], width[i])
+            for i in range(len(x1))
+        ]
+
+    def _materialize_polylines(self) -> List[Polyline]:
+        records = self._poly_records
+        if not records:
+            return []
+        layer_str = self._layer_names
+        return [
+            Polyline(pid,
+                     list(zip(xs.tolist(), ys.tolist())),
+                     net_id, layer_str[layer_b])
+            for xs, ys, net_id, pid, layer_b in records
+        ]
 
     @classmethod
     def from_file(
@@ -706,51 +1040,184 @@ class TraceGraph:
                 return cached
 
         buf = Path(path).read_bytes()
-        (top_s, top_e), (bot_s, bot_e) = _board_regions_for(path)
+        regions = _board_regions_for(path, buf)
+        n_layers = len(regions)
+        layer_names = _layer_names_for_regions(n_layers)
 
         # Decode the net name table once; needed by net_name() and useful
         # for diagnostics on the way out.
         nt_start, nt_end = _find_net_table(buf)
         net_names = _build_net_index(buf, nt_start, nt_end) if nt_start >= 0 else []
 
-        # Region cap (2026-05-07 polyline crack): the BOTTOM region in
-        # KNOWN_BOARDS extends past the net-table into footprint/chip data.
-        # Polyline scanners false-match on those bytes (especially huge K
-        # values >10k). The actual trace polyline data ends BEFORE the
-        # net-table start, so cap any region that runs into it.
+        # Net-table boundary handling. The net-table sits AFTER all
+        # trace data on every TVW we've inspected, so it gives us a
+        # hard upper bound on where genuine trace regions can live.
+        # Two cases:
+        #   (a) a region straddles nt_start  -> cap end at nt_start
+        #       (2026-05-07 polyline-crack fix; the original 2-layer
+        #       code only handled this case for TOP/BOTTOM)
+        #   (b) a region starts AT or PAST nt_start -> drop entirely.
+        #       These are metadata Custom_NN clusters (component data,
+        #       footprint outlines, net-name table fragments) that the
+        #       autodetect picked up because they have a >= 50KB gap
+        #       between adjacent headers. They contain no trace data
+        #       and would feed garbage into the topology if scanned.
         if nt_start > 0:
-            if top_s < nt_start < top_e:
-                top_e = nt_start
-            if bot_s < nt_start < bot_e:
-                bot_e = nt_start
+            new_regions: List[Tuple[int, int]] = []
+            for rs, re_ in regions:
+                if rs >= nt_start:
+                    continue
+                if re_ > nt_start:
+                    re_ = nt_start
+                new_regions.append((rs, re_))
+            regions = new_regions
+            n_layers = len(regions)
+            layer_names = _layer_names_for_regions(n_layers)
+        if n_layers == 0:
+            raise ValueError(
+                f"No trace-data regions remain in {path} after net-table "
+                f"trim. The file structure may be unusual; run tvw_customs.py "
+                f"to inspect.")
 
-        # Pull all geometry. Layer comes from which region we scanned.
-        pads, segs, polys = [], [], []
-        next_pad_id = next_seg_id = next_poly_id = 0
-        for layer, rs, re_ in [("TOP", top_s, top_e), ("BOTTOM", bot_s, bot_e)]:
-            (lp, ls, lpoly,
-             next_pad_id, next_seg_id, next_poly_id) = _extract_layer_records(
-                buf, rs, re_, layer, next_pad_id, next_seg_id, next_poly_id)
-            pads.extend(lp)
-            segs.extend(ls)
-            polys.extend(lpoly)
+        # Pull all geometry. Each layer's records are tagged with its
+        # layer-byte (see `_layer_byte_for_region`), so once merged the
+        # arrays carry per-record layer info that survives downstream.
+        # Run all N layers in parallel — the C scanners (tvw_native)
+        # release the GIL during their scan loops, which dominate this
+        # phase, so threads genuinely run on multiple cores. For mobos
+        # that's 2 threads; for GPU PCBs ~10. The thread-pool overhead
+        # is negligible vs the per-region scan time (hundreds of ms each).
+        #
+        # ID accounting: each thread starts at 0; per-layer ids are
+        # shifted by the running unfiltered-count totals from preceding
+        # layers (in file order) so cross-layer ids stay collision-free.
+        # We use UNFILTERED counts returned by `_extract_layer_records`
+        # (n_pad / n_seg / n_poly), not the filtered-list lengths, so
+        # absolute id values match what the previous serial implementation
+        # produced for the legacy 2-layer boards. That keeps the topology
+        # graph bit-identical to pre-threading runs on Z490/X570/B550
+        # (which the Phase 3 spatial assertions depend on).
+        import threading
+        per_layer_results: List[Tuple[Any, ...]] = [None] * n_layers
+
+        def _do(idx: int, rs: int, re_: int) -> None:
+            ln = layer_names[idx]
+            lb = _layer_byte_for_region(idx, n_layers)
+            (n_pad, n_seg, n_poly,
+             pa, sa, qa) = _extract_layer_records(
+                buf, rs, re_, ln, 0, 0, 0, layer_byte=lb,
+            )
+            per_layer_results[idx] = (n_pad, n_seg, n_poly, pa, sa, qa)
+
+        threads = [
+            threading.Thread(
+                target=_do, args=(idx, rs, re_), daemon=True,
+            )
+            for idx, (rs, re_) in enumerate(regions)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Walk results in file order, accumulating id shifts. This keeps
+        # final pad/seg/poly id values matching the legacy 2-layer code
+        # (TOP first, BOTTOM second) bit-for-bit.
+        cum_pad = cum_seg = cum_poly = 0
+        pad_chunks: List[Tuple[Dict[str, Any], int]] = []
+        seg_chunks: List[Tuple[Dict[str, Any], int]] = []
+        poly_chunks: List[Tuple[Dict[str, Any], int, int]] = []
+        for idx, (n_pad, n_seg, n_poly, pa, sa, qa) in enumerate(per_layer_results):
+            if pa is not None:
+                pad_chunks.append((pa, cum_pad))
+            if sa is not None:
+                seg_chunks.append((sa, cum_seg))
+            if qa is not None:
+                poly_chunks.append((qa, cum_poly, idx))
+            cum_pad += n_pad
+            cum_seg += n_seg
+            cum_poly += n_poly
+
+        # Merge per-layer pad arrays. Each pa already has its own
+        # layer_byte; we just expand it into a per-record uint8 array.
+        merged_pad_arrays: Optional[Dict[str, Any]] = None
+        if pad_chunks:
+            xs, ys, ns, ts, ss, ids, layers = [], [], [], [], [], [], []
+            for pa, id_shift in pad_chunks:
+                xs.append(pa["x"]); ys.append(pa["y"])
+                ns.append(pa["net_id"])
+                ts.append(pa["pad_type"])
+                ss.append(pa["stride"])
+                ids.append(pa["pad_id"] + id_shift)
+                layers.append(np.full(pa["x"].shape[0],
+                                      pa["layer_byte"], dtype=np.uint8))
+            merged_pad_arrays = {
+                "x":        np.concatenate(xs),
+                "y":        np.concatenate(ys),
+                "net_id":   np.concatenate(ns),
+                "pad_type": np.concatenate(ts),
+                "stride":   np.concatenate(ss),
+                "pad_id":   np.concatenate(ids),
+                "layer":    np.concatenate(layers),
+            }
+
+        merged_seg_arrays: Optional[Dict[str, Any]] = None
+        if seg_chunks:
+            x1s, y1s, x2s, y2s = [], [], [], []
+            ns, ws, ids, layers = [], [], [], []
+            for sa, id_shift in seg_chunks:
+                x1s.append(sa["x1"]); y1s.append(sa["y1"])
+                x2s.append(sa["x2"]); y2s.append(sa["y2"])
+                ns.append(sa["net_id"])
+                ws.append(sa["width"])
+                ids.append(sa["seg_id"] + id_shift)
+                layers.append(np.full(sa["x1"].shape[0],
+                                      sa["layer_byte"], dtype=np.uint8))
+            merged_seg_arrays = {
+                "x1": np.concatenate(x1s), "y1": np.concatenate(y1s),
+                "x2": np.concatenate(x2s), "y2": np.concatenate(y2s),
+                "net_id": np.concatenate(ns),
+                "width":  np.concatenate(ws),
+                "seg_id": np.concatenate(ids),
+                "layer":  np.concatenate(layers),
+            }
+
+        # Polylines stay as a list of (xs_arr, ys_arr, net_id, poly_id,
+        # layer_byte) for the C build path.
+        merged_poly_records: List[Tuple[Any, Any, int, int, int]] = []
+        for qa, id_shift, _idx in poly_chunks:
+            for i, (xs_arr, ys_arr, net_id) in enumerate(qa["kept"]):
+                merged_poly_records.append(
+                    (xs_arr, ys_arr, net_id,
+                     qa["poly_id_start"] + id_shift + i,
+                     qa["layer_byte"]))
 
         # Decide whether net_id=0 is a real net or an "untagged" sentinel.
-        # Use record density: if >2 % of pads have net_id=0, it's a real
-        # net (typically GND on X570). Otherwise treat 0 as untagged.
-        # The name field is unreliable — Z490 has "N48617361" (clearly
-        # synthesised), B550 has "VNB_FB+" (real-looking but unused),
-        # X570 has "GND" (real and used). Density tells us the truth.
-        n0_pads = sum(1 for p in pads if p.net_id == 0)
-        zero_real = bool(pads) and (n0_pads / len(pads)) > 0.02
+        # Vectorised — counts directly off the merged numpy array; no
+        # need to iterate dataclass instances.
+        if merged_pad_arrays is not None:
+            net_arr = merged_pad_arrays["net_id"]
+            n0_pads = int(np.count_nonzero(net_arr == 0))
+            n_pads = int(net_arr.shape[0])
+            zero_real = n_pads > 0 and (n0_pads / n_pads) > 0.02
+        else:
+            zero_real = False
 
+        # Build the graph WITHOUT pre-built dataclass lists — the
+        # canonical state lives in the numpy arrays we just merged.
+        # Lists materialise lazily on first .pads/.segments/.polylines
+        # access via the @property accessors.
         graph = cls(
-            pads=pads, segments=segs, polylines=polys, net_names=net_names,
+            net_names=net_names,
             endpoint_tol=endpoint_tol, via_tol=via_tol,
             same_net_pad_tol=same_net_pad_tol,
             pad_to_trace_tol=pad_to_trace_tol,
             _zero_is_real_net=zero_real,
+            _layer_names=layer_names,
         )
+        graph._pad_arrays = merged_pad_arrays
+        graph._seg_arrays = merged_seg_arrays
+        graph._poly_records = merged_poly_records
         graph._build()
         if use_cache:
             cls._try_save_cache(graph, path, endpoint_tol, via_tol,
@@ -824,6 +1291,176 @@ class TraceGraph:
 
     # ---- internal: graph construction ------------------------------------
 
+    def _build_native(self) -> bool:
+        """Run the C `build_topology_native` and adapt its output into
+        the same Python state shape `_build()` would have produced.
+        Returns True if it succeeded, False if the DLL isn't available
+        (caller falls through to pure Python).
+
+        Hot path: when `from_file` stashed the post-filter numpy arrays
+        on the graph (via `_build_pad_arrays` / `_build_seg_arrays` /
+        `_build_poly_records`), we hand them directly to the array
+        entry point — no Python iteration over the dataclass list.
+        Cache-loaded graphs don't have those arrays; we fall back to
+        the legacy list-of-tuples path which iterates self.pads etc.
+        """
+        try:
+            from tvw_native import build_topology, build_topology_arrays
+        except Exception:
+            return False
+
+        pad_arrays = self._pad_arrays
+        seg_arrays = self._seg_arrays
+        poly_records = self._poly_records
+        if pad_arrays is not None or seg_arrays is not None \
+                or poly_records:
+            result = build_topology_arrays(
+                pad_arrays, seg_arrays, poly_records or [],
+                endpoint_tol=self.endpoint_tol,
+                via_tol=self.via_tol,
+                same_net_pad_tol=self.same_net_pad_tol,
+                pad_to_trace_tol=self.pad_to_trace_tol,
+                zero_is_real_net=self._zero_is_real_net,
+            )
+        else:
+            # Cache-load path or external caller: fall back to lists.
+            pads_in = [
+                (p.x, p.y, p.net_id, p.pad_id, p.layer)
+                for p in self.pads
+            ]
+            segs_in = [
+                (s.x1, s.y1, s.x2, s.y2, s.net_id, s.seg_id, s.layer)
+                for s in self.segments
+            ]
+            polys_in = [
+                (p.poly_id, p.vertices, p.net_id, p.layer)
+                for p in self.polylines
+            ]
+            result = build_topology(
+                pads_in, segs_in, polys_in,
+                endpoint_tol=self.endpoint_tol,
+                via_tol=self.via_tol,
+                same_net_pad_tol=self.same_net_pad_tol,
+                pad_to_trace_tol=self.pad_to_trace_tol,
+                zero_is_real_net=self._zero_is_real_net,
+            )
+        if result is None:
+            return False
+
+        # Materialise Python state from the numpy outputs. The shapes
+        # match the legacy `_build` exactly so the public query API
+        # (find_broken_nets / net_at / geometry_on_net) works unchanged.
+        nx = result["node_x"].tolist()
+        ny = result["node_y"].tolist()
+        nl = result["node_layer"].tolist()
+        self._node_xy = list(zip(nx, ny))
+        # Map layer-byte back to the layer string. Indices outside the
+        # board's `_layer_names` shouldn't happen (would mean a stray
+        # uint8 value the C side never wrote) but guard anyway.
+        layer_str = self._layer_names
+        n_layers = len(layer_str)
+        self._node_layer = [
+            layer_str[v] if 0 <= v < n_layers
+            else f"LAYER_{int(v)}"
+            for v in nl
+        ]
+        self._node_net = result["node_net"].tolist()
+
+        # Union-find: copy the C-side parent/rank/size arrays into a
+        # Python UnionFind so the existing `find_broken_nets()` works.
+        n_nodes = result["node_count"]
+        self._uf = UnionFind(n_nodes)
+        self._uf.parent = result["uf_parent"].tolist()
+        self._uf.rank = result["uf_rank"].tolist()
+        self._uf.size = result["uf_size"].tolist()
+
+        # Per-record id->node maps. Resolve original ids from whatever
+        # path we took: arrays carry pad_id/seg_id/poly_id directly;
+        # the list path uses dataclass attributes.
+        pn = result["pad_node"].tolist()
+        if pad_arrays is not None:
+            pid_list = pad_arrays["pad_id"].tolist()
+            self._pad_node = {pid_list[i]: pn[i] for i in range(len(pn))}
+        else:
+            self._pad_node = {
+                p.pad_id: pn[i] for i, p in enumerate(self.pads)
+            }
+        sa = result["seg_node_a"].tolist()
+        sb = result["seg_node_b"].tolist()
+        if seg_arrays is not None:
+            sid_list = seg_arrays["seg_id"].tolist()
+            self._seg_nodes = {
+                sid_list[i]: (sa[i], sb[i]) for i in range(len(sa))
+            }
+        else:
+            self._seg_nodes = {
+                s.seg_id: (sa[i], sb[i]) for i, s in enumerate(self.segments)
+            }
+        pnd = result["poly_nodes_data"]
+        pnoff = result["poly_nodes_off"]
+        self._poly_nodes = {}
+        if poly_records is not None:
+            for i, rec in enumerate(poly_records):
+                pid = rec[3]
+                o0 = int(pnoff[i])
+                o1 = int(pnoff[i + 1])
+                self._poly_nodes[pid] = pnd[o0:o1].tolist()
+        else:
+            for i, p in enumerate(self.polylines):
+                o0 = int(pnoff[i])
+                o1 = int(pnoff[i + 1])
+                self._poly_nodes[p.poly_id] = pnd[o0:o1].tolist()
+
+        # Backfilled net ids — write into the canonical arrays. If the
+        # dataclass list caches are already populated (rare; means
+        # someone iterated .pads/.segments before build), invalidate
+        # them so the next access re-materialises with the new nets.
+        seg_net = result["seg_net"]
+        if self._seg_arrays is not None and seg_net.shape[0]:
+            self._seg_arrays["net_id"] = seg_net.astype(np.int32, copy=False)
+        poly_net = result["poly_net"].tolist()
+        if self._poly_records:
+            self._poly_records = [
+                (xs, ys, poly_net[i], pid, lb)
+                for i, (xs, ys, _, pid, lb) in enumerate(self._poly_records)
+            ]
+        # Invalidate caches only when the canonical arrays were just
+        # updated. On the legacy list-fallback path (e.g. GENCAD) the
+        # caches ARE the canonical state — clearing them would force
+        # `_materialize_*` to read empty arrays and return []. The
+        # array path's caches (if any) need to drop because the new
+        # net_ids in the arrays would otherwise diverge from the cache.
+        if self._seg_arrays is not None:
+            self._segs_cache = None
+        if self._poly_records:
+            self._polys_cache = None
+
+        # Counters.
+        self._via_count = result["via_count"]
+        self._same_net_pad_fusions = result["snp_count"]
+        self._pad_to_trace_fusions = result["ptt_count"]
+        self.propagation_conflicts = result["propagation_conflicts"]
+        self.propagation_changes = result["propagation_changes"]
+
+        # Defer SpatialHash population. `net_at()` is the only consumer;
+        # most builds never call it, so we build it lazily on first
+        # access. Saves ~200 ms on the cold path. See `_ensure_spatial`.
+        self._spatial = None
+
+        return True
+
+    def _ensure_spatial(self) -> "SpatialHash":
+        """Lazy-build the SpatialHash from current node positions.
+        Called on first `net_at` access after a native build."""
+        if self._spatial is not None:
+            return self._spatial
+        sh = SpatialHash(self.endpoint_tol)
+        for nid in range(len(self._node_xy)):
+            x, y = self._node_xy[nid]
+            sh.add(self._node_layer[nid], x, y, nid)
+        self._spatial = sh
+        return sh
+
     def _add_node(self, layer: str, x: int, y: int, net_id: int = 0) -> int:
         """Find-or-create a graph node for an endpoint at (layer, x, y).
 
@@ -860,6 +1497,12 @@ class TraceGraph:
     def _build(self) -> None:
         """Wire endpoints into nodes, segments/polylines into edges,
         propagate nets, and bridge layers via vias."""
+        # Native fast path — runs the entire phase in C (~5-10× total
+        # wall-time on Z490). Falls through to Python below if the DLL
+        # isn't available.
+        if self._build_native():
+            return
+
         self._spatial = SpatialHash(self.endpoint_tol)
         self._uf = UnionFind(0)
 
@@ -1117,10 +1760,11 @@ class TraceGraph:
         """
         # If tol > endpoint_tol the 3x3 neighbourhood may miss matches;
         # widen the search radius in cells.
+        sh = self._ensure_spatial()
         if tol <= self.endpoint_tol:
             best_id = -1
             best_d2 = tol * tol + 1
-            for nid in self._spatial.query_near(layer, x, y):
+            for nid in sh.query_near(layer, x, y):
                 nx, ny = self._node_xy[nid]
                 d2 = (nx - x) ** 2 + (ny - y) ** 2
                 if d2 <= tol * tol and d2 < best_d2:
@@ -1128,7 +1772,7 @@ class TraceGraph:
                     best_id = nid
             return self._node_net[best_id] if best_id >= 0 else 0
         # Wider scan: iterate manually over more cells.
-        cell = self._spatial.cell
+        cell = sh.cell
         radius_cells = (tol // cell) + 1
         gx = x // cell
         gy = y // cell
@@ -1136,7 +1780,7 @@ class TraceGraph:
         best_d2 = tol * tol + 1
         for dx in range(-radius_cells, radius_cells + 1):
             for dy in range(-radius_cells, radius_cells + 1):
-                bucket = self._spatial.buckets.get((layer, gx + dx, gy + dy))
+                bucket = sh.buckets.get((layer, gx + dx, gy + dy))
                 if not bucket:
                     continue
                 for nid in bucket:
@@ -1150,9 +1794,48 @@ class TraceGraph:
     def geometry_on_net(
         self, net_id: int,
     ) -> Tuple[List[Segment], List[Polyline]]:
-        """All segments and polylines on the given net. For renderers."""
-        s = [seg for seg in self.segments if seg.net_id == net_id]
-        p = [poly for poly in self.polylines if poly.net_id == net_id]
+        """All segments and polylines on the given net. For renderers.
+
+        Uses the numpy net_id array for O(N) mask + materialise only
+        the matching rows, when arrays are available. Avoids paying
+        the full `len(segments)` materialisation cost on every call.
+        """
+        # Segments: numpy mask first, then build only matching Segment
+        # instances (typically 0 — 500 per net out of ~43 K total).
+        s_arr = self._seg_arrays
+        if s_arr is not None:
+            net_arr = s_arr["net_id"]
+            mask = (net_arr == net_id)
+            if mask.any():
+                idx = np.flatnonzero(mask).tolist()
+                x1 = s_arr["x1"]; y1 = s_arr["y1"]
+                x2 = s_arr["x2"]; y2 = s_arr["y2"]
+                sid = s_arr["seg_id"]; width = s_arr["width"]
+                layer = s_arr["layer"]
+                layer_str = self._layer_names
+                s = [
+                    Segment(int(sid[i]), int(x1[i]), int(y1[i]),
+                            int(x2[i]), int(y2[i]),
+                            net_id, layer_str[layer[i]], int(width[i]))
+                    for i in idx
+                ]
+            else:
+                s = []
+        else:
+            s = [seg for seg in self.segments if seg.net_id == net_id]
+
+        # Polylines: filter the records list (small count, varying len)
+        if self._poly_records:
+            layer_str = self._layer_names
+            p = [
+                Polyline(pid,
+                         list(zip(xs.tolist(), ys.tolist())),
+                         net_id, layer_str[layer_b])
+                for xs, ys, n, pid, layer_b in self._poly_records
+                if n == net_id
+            ]
+        else:
+            p = [poly for poly in self.polylines if poly.net_id == net_id]
         return s, p
 
     def pads_on_net(self, net_id: int) -> List[Pad]:

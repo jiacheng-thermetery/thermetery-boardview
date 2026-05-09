@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) 2026 Thermetery Technology LLC
+#
+# TVW format research starting point: https://github.com/inflex/teboviewformat
+# (MIT, Copyright (c) 2021 Paul Daniels). The pioneering reverse engineering
+# done there is the basis from which this independent decode was developed —
+# the implementation below does not include or derive from teboviewformat's
+# source, but credit is due. See THIRD_PARTY_NOTICES.md for the full courtesy
+# reproduction of the upstream MIT notice.
 
 """
 Best-effort parser for Teboview / TVW boardview files (Gigabyte/Lenovo etc).
@@ -27,12 +34,17 @@ X570, B550, and BoardViewer.exe ground-truth on individual chips):
     derived from board span ≈ ATX 305mm vs 938k chip-position units).
   - Net name table (3015 packed Pascal strings on Z490) at file offset
     ~+5987078 — kept as a list for reference.
-  - Pin → net mapping via the 38-byte pad records inside the Custom_35 /
-    Custom_17 trace blocks. Each pad record carries the net id at offset
-    +22 and the chip XY in pre-32 i32[1],i32[0]. We match each pad to the
-    nearest chip pin in world coordinates (via the master-footprint
-    transform — see `tvw_master_fp.py`) and assign that pin to the net
-    named at `net_table[net_id]`. Verified on Z490, X570, B550.
+
+Pin → net mapping (formerly the missing piece, now solved):
+
+  - The mapping is encoded as fixed-size 38-byte pad records embedded
+    inside the Custom_35 (TOP) and Custom_17 (BOTTOM) trace-data blocks,
+    not in any obvious table. Each record carries the chip-relative pad
+    XY plus the net id at +22 (key into the net-name table). A 54-byte
+    variant appears with 16 extra bytes inserted before the coordinates.
+    See the scanner/decoder a few hundred lines below this docstring,
+    and TVW_FORMAT.md for the full layout. Verified on Z490 / B550 /
+    X570 / GV-N780OC.
 
 Format anchors (verified across 3 boards):
 
@@ -324,6 +336,16 @@ def _find_net_table(buf: bytes) -> Tuple[int, int]:
     Early-exit once a run of >= 1000 strings is found — the net table
     on real boards has thousands of entries; nothing else comes close.
     """
+    # Native fast path — `tvw_native.find_net_table` is a faithful port
+    # that runs ~100× faster. Falls through to Python below if the DLL
+    # isn't available.
+    try:
+        from tvw_native import find_net_table as _nat_find_net_table
+        result = _nat_find_net_table(buf)
+        if result is not None:
+            return result
+    except Exception:
+        pass
     n = len(buf)
     # Bitmap of bytes outside [0x21, 0x7e] — '\x00' = printable, '\xff' = not.
     # `mask.find(b'\xff', start, end)` then tells us whether any byte in a
@@ -407,6 +429,14 @@ def _find_pad_runs(
     Both formats use bytes.find on the sentinel `\\x00\\x00` to skip
     quickly to candidate positions in C speed.
     """
+    # Native fast path — ~60× speedup. See tvw_native.c.
+    try:
+        from tvw_native import find_pad_runs as _nat_find_pad_runs
+        result = _nat_find_pad_runs(buf, min_run=min_run)
+        if result is not None:
+            return result
+    except Exception:
+        pass
     n = len(buf)
     runs: List[Tuple[int, int, int]] = []
 
