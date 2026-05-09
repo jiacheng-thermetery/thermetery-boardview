@@ -8,6 +8,12 @@ venv/
 # Per-board topology caches (generated at runtime from .tvw files)
 *.topocache.pkl
 
+# Decrypted FZ plaintext cache — sits next to the source .fz file after
+# a successful RC6 decode. NEVER commit: it's the proprietary boardview
+# content in cleartext form, which is exactly the IP/leakage hazard the
+# encryption was meant to prevent.
+*.fz.cache
+
 # IDE / editor cruft
 .vscode/
 .idea/
@@ -18,12 +24,22 @@ Thumbs.db
 # User config (last-used dir + recent file list)
 .boardviewer.json
 
+# User-supplied keys and any other private content. The fz_parser and
+# xzzpcb_parser look for `private/fz_key.txt` and `private/XZZ_Key.txt`
+# (44-word RC6 keys for ASUS .fz files; 64-bit DES keys for XZZ .pcb
+# files). These are typically EXTRACTED FROM PROPRIETARY VIEWERS by the
+# user and MUST NOT be committed — that would defeat the licensing
+# intent of the upstream tools and create a real legal hazard.
+private/
+
 # Sample boardview / schematic files — keep the repo lean. Drop a .tvw,
-# .cad, .brd, .brd2, .bv, or .pdf in your working directory and pass it
-# on the command line; don't commit boards into the repo.
+# .cad, .brd, .brd2, .bv, .fz, .pcb, or .pdf in your working directory
+# and pass it on the command line; don't commit boards into the repo.
 *.tvw
 *.cad
 *.brd
 *.brd2
 *.bv
+*.fz
+*.pcb
 *.pdf
