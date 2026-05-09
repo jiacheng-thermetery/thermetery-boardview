@@ -12,6 +12,7 @@ Loads:
 | GENCAD 1.4                 | `.cad`                    | Mentor / Teradyne ASCII        |
 | OpenBoardView ASCII        | `.brd`, `.brd2`, `.bv`    | BRD2 (modern) and legacy BRD   |
 | Teboview (Gigabyte)        | `.tvw`                    | binary; pin↔net + traces       |
+| Allegro Extracta `.fz`     | `.fz`                     | binary; ASRock = zlib-only, ASUS = RC6+zlib (needs an FZKey at `private/fz_key.txt`) |
 | XZZPCB (MSI / repair shops)| `.pcb`                    | binary, DES-encrypted; needs an XZZ key (see THIRD_PARTY_NOTICES.md) |
 
 For the TVW binary format, see [TVW_FORMAT.md](TVW_FORMAT.md) for a working spec
@@ -83,6 +84,17 @@ tvw_seg_27_unified_v3.py  TVW polyline / chain block scanner
 tvw_native.{c,dll,py}   optional C-extension fast path for the scanners
                           (~600× speedup on cold loads; .py shim falls
                           back to pure Python if the .dll is absent)
+fz_parser.py            .fz parser (Allegro Extracta)  → BoardModel
+                          Independent Python implementation; format
+                          spec verified against OpenBoardView's
+                          FZFile.cpp. ASRock files parse without a
+                          key; ASUS files need an FZKey.
+rc6_native.{c,dll}      optional C fast-path port of FZFile::decode
+                          (RC6-CFB-1 cipher used by ASUS .fz). MIT-
+                          licensed; attribution in THIRD_PARTY_NOTICES.md
+                          and LICENSES/. Pure-Python fallback in
+                          fz_parser.py runs when the .dll is absent
+                          (~150× slower but works).
 xzzpcb_parser.py        .pcb parser (XZZPCB V1.0)  → BoardModel
                           Python port of OpenBoardView's XZZPCBFile.cpp
                           and dhuertas/DES; both MIT, attribution in
@@ -107,6 +119,9 @@ Working. Loads tested against:
 - Gigabyte Z490 VISION G, X570 GAMING X, B550 AORUS PRO AC (TVW)
 - Gigabyte GV-N780OC-3GD GPU (TVW, 10-layer — exercises the multi-
   layer trace cycle and cross-layer highlight)
+- ASRock X370P-RO4, Z390 Pro4, Z97X Killer (FZ, zlib-only path)
+- ASUS PRIME Z370-A, ASUS GTX 1080 Ti STRIX (FZ, also zlib-only —
+  not all ASUS files are RC6-encrypted)
 - MSI V389/7913/7914/7A05/7A06 series, PS5 EDM-010 (XZZPCB)
 
 ## Known Issues

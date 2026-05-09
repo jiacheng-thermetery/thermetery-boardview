@@ -1,21 +1,28 @@
 # Third-Party Notices
 
-Most of this repository's parsers (`brd_parser.py`, `tvw_parser.py`,
-`tvw_master_fp.py`, `tvw_seg_27_unified_v3.py`, `tvw_topology.py`) are
-**independent implementations**, informed by file-format documentation
-and reverse-engineering work in the upstream projects listed below.
+Most of this repository's parsers (`brd_parser.py`, `fz_parser.py`,
+`tvw_parser.py`, `tvw_master_fp.py`, `tvw_seg_27_unified_v3.py`,
+`tvw_topology.py`) are **independent implementations**, informed by
+file-format documentation and reverse-engineering work in the upstream
+projects listed below.
 
-One parser is different: `xzzpcb_parser.py` is a **Python port** of
-OpenBoardView's `XZZPCBFile.cpp` (parser logic and record schema for
-XZZ `.pcb` files) and of dhuertas/DES (the DES decryption used inside
-that parser). Both upstreams are MIT-licensed and explicitly permit
-this; the verbatim license texts are reproduced both here and under
-[`LICENSES/`](LICENSES/).
+Two pieces are direct ports rather than rewrites:
+
+  * `xzzpcb_parser.py` — Python port of OpenBoardView's
+    `XZZPCBFile.cpp` (XZZ parser) and of dhuertas/DES (DES
+    decryption used inside that parser).
+  * `rc6_native.c` — C port of OpenBoardView's `FZFile::decode`
+    (RC6-CFB-1 cipher used by ASUS `.fz` files). Optional fast path
+    for `fz_parser.py`; pure-Python fallback in fz_parser.py runs
+    when the .dll is absent.
+
+All upstreams are MIT-licensed and explicitly permit this; the verbatim
+license texts are reproduced both here and under [`LICENSES/`](LICENSES/).
 
 The MIT notices and permission text below are reproduced for license
 compliance and as a courtesy to downstream users. They apply to the
-ported portions of `xzzpcb_parser.py`. The rest of this repository's
-own code is licensed under LGPL-3.0-or-later (see [LICENSE](LICENSE)).
+ported portions named above. The rest of this repository's own code
+is licensed under LGPL-3.0-or-later (see [LICENSE](LICENSE)).
 
 ---
 
@@ -26,17 +33,27 @@ own code is licensed under LGPL-3.0-or-later (see [LICENSE](LICENSE)).
   - reference to the BRD / BRD2 ASCII boardview format
     (`brd_parser.py` — independent Python implementation, does not
     include or derive from OpenBoardView's C++ source).
+  - reference to the Allegro Extracta `.fz` format
+    (`fz_parser.py` — independent Python implementation that
+    follows the same record schema OpenBoardView's `FZFile.cpp`
+    defines, but does not include or derive from its source).
+  - **C port** of `src/openboardview/FileFormats/FZFile.cpp`'s
+    `FZFile::decode` (RC6-CFB-1 cipher) for the `rc6_native.dll`
+    fast path used by `fz_parser.py` on ASUS files
+    (`rc6_native.c`).
   - **Python port** of `src/openboardview/FileFormats/XZZPCBFile.cpp`
     and `XZZPCBFile.h` for the XZZ `.pcb` parser
     (`xzzpcb_parser.py`). Format reversal credit per the upstream
     file header: @huertas (DES), @inflex, @MuertoGB, @slimeinacloak,
     @piernov, Thomas Lamy.
-  - **Note on the XZZ DES key**: OpenBoardView does not ship a
-    working key, and neither does this repository. Users supply
-    their own (e.g. extracted from the proprietary XZZ viewer they
-    already own) via `private/XZZ_Key.txt` or the `XZZPCB_KEY`
-    environment variable. Without a key the outline + test pads
-    + net list still parse; encrypted part/pin records are skipped.
+  - **Note on keys**: OpenBoardView does not ship working ASUS-FZ
+    or XZZ-DES keys, and neither does this repository. Users supply
+    their own (e.g. extracted from a proprietary viewer they already
+    own) via `private/fz_key.txt` for ASUS .fz files, and
+    `private/XZZ_Key.txt` or the `XZZPCB_KEY` environment variable
+    for XZZ .pcb files. Without keys: ASRock-style .fz files still
+    parse fully; XZZ files parse outline + test pads + net list,
+    skipping encrypted part/pin records.
 - License:   MIT
 
 ```

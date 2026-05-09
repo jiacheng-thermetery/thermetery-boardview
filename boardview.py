@@ -12,6 +12,10 @@ Supported today:
                          (components, positions, per-chip pins, and
                          pin↔net mapping via the 38-byte pad records
                          buried in Custom_35/Custom_17 trace blocks)
+  .fz                  — ASRock / ASUS Allegro Extracta            partial
+                         (zlib-only for ASRock; RC6+zlib for ASUS,
+                         needs an FZKey at private/fz_key.txt). No
+                         trace routing data in the file format.
   .pcb                 — XZZPCB V1.0 (MSI / Chinese repair shops)  partial
                          (binary; needs an XZZ DES key at
                          private/XZZ_Key.txt or env XZZPCB_KEY.
@@ -29,6 +33,7 @@ from gencad_parser import BoardModel, Component, Shape
 from gencad_parser import parse as _parse_gencad
 from brd_parser import parse as _parse_brd
 from tvw_parser import parse as _parse_tvw
+from fz_parser import parse as _parse_fz
 from xzzpcb_parser import parse as _parse_xzzpcb
 from xzzpcb_parser import verify_format as _verify_xzzpcb
 
@@ -38,8 +43,9 @@ PathLike = Union[str, Path]
 GENCAD_EXTS = {".cad"}
 BRD_EXTS = {".brd", ".brd2", ".bv"}
 TVW_EXTS = {".tvw"}
+FZ_EXTS = {".fz"}
 XZZPCB_EXTS = {".pcb"}
-ALL_EXTS = GENCAD_EXTS | BRD_EXTS | TVW_EXTS | XZZPCB_EXTS
+ALL_EXTS = GENCAD_EXTS | BRD_EXTS | TVW_EXTS | FZ_EXTS | XZZPCB_EXTS
 
 
 def parse(path: PathLike) -> BoardModel:
@@ -51,6 +57,8 @@ def parse(path: PathLike) -> BoardModel:
         return _parse_brd(p)
     if ext in TVW_EXTS:
         return _parse_tvw(p)
+    if ext in FZ_EXTS:
+        return _parse_fz(p)
     if ext in XZZPCB_EXTS:
         return _parse_xzzpcb(p)
     return _sniff_and_parse(p)
