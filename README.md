@@ -1,4 +1,4 @@
-# `.tvw` Boardviewer
+# Thermetery Boardviewer
 
 A pan/zoom viewer for PCB boardview files, with component and net browsing.
 Multi-layer trace inspection on GPU PCBs (TOP, BOTTOM, INNER_1..N), pin↔net
