@@ -267,6 +267,20 @@ class BoardCanvasCPU(tk.Canvas):
     TRACE_DIMMED_BOTTOM = "#3a1c14"
     TRACE_HIGHLIGHT = "#ffff66"
     TRACE_DIMMED_ZOOM_THRESHOLD = 2.0
+    # Via markers: small open circles drawn on top of the trace layer.
+    # Click → flip view layer (TOP↔BOTTOM). Cyan because the trace dim
+    # palette is blue/red and yellow is reserved for net highlight, so
+    # this stays unambiguously a via and not a trace or pad. Drawn only
+    # at TRACE_DIMMED_ZOOM_THRESHOLD or higher — at low zoom the markers
+    # would salt-and-pepper the board into noise.
+    VIA_COLOR = "#00ccff"
+    VIA_MARKER_R_PX = 3.5
+    VIA_MARKER_THICKNESS_PX = 1.2
+    # Click hit-test radius. A bit looser than the visual marker so the
+    # user doesn't have to land exactly on the ring. Tighter than the
+    # component-pick radius (18 px) so vias only "win" the click race
+    # when the cursor is genuinely on a marker.
+    VIA_CLICK_RADIUS_PX = 8
     # Faint outline colour used when an inner copper layer is in view.
     # Components live on TOP/BOTTOM only, so on an inner-layer view we
     # render every component as a ghost in this colour for orientation —
@@ -1068,16 +1082,40 @@ class BoardCanvasCPU(tk.Canvas):
             except Exception:
                 sel_net_id = None
 
+        # Synthetic ratsnest topologies (no real routed-trace data; e.g.
+        # CAD/BRD/FZ/PCB) are styled at 70 % alpha to convey "illustrative,
+        # not actual routing", and cross-layer MST edges (`seg.dashed`)
+        # render with a dashed paint via Skia's PathEffect. Real TVW
+        # topology has no `is_synthetic`/`dashed` so all that branches
+        # off cleanly.
+        is_synthetic = getattr(topo, "is_synthetic", False)
+        synth_alpha_scale = 0.7 if is_synthetic else 1.0
+
         # Phase A — dimmed all-traces on the *current* layer (zoom-gated,
         # viewport-culled). Other layers' background traces are not drawn:
         # rendering 13 k segments × N layers would overwhelm the display
         # and the user only needs the current layer's structural context.
         if self.zoom >= self.TRACE_DIMMED_ZOOM_THRESHOLD:
             r, g, b, a = self._hex_to_rgba(_layer_color(layer, dim=True))
+            a = int(a * synth_alpha_scale)
             paint = _skia.Paint()
             paint.setColor(_skia.Color(r, g, b, a))
             paint.setStrokeWidth(1.0)
             paint.setAntiAlias(False)
+            # Dashed paint, only built for synthetic topologies. Skia's
+            # PathEffect requires drawPath (drawLine ignores the effect),
+            # which costs one Path allocation per dashed segment — but
+            # the dashed set is the cross-layer minority of a ratsnest
+            # (~10 % of edges); the bulk solid path keeps drawLine speed.
+            paint_dashed: Optional["_skia.Paint"] = None
+            if is_synthetic:
+                paint_dashed = _skia.Paint()
+                paint_dashed.setColor(_skia.Color(r, g, b, a))
+                paint_dashed.setStrokeWidth(1.0)
+                paint_dashed.setAntiAlias(False)
+                paint_dashed.setStyle(_skia.Paint.Style.kStroke_Style)
+                paint_dashed.setPathEffect(
+                    _skia.DashPathEffect.Make([4.0, 4.0], 0.0))
             for seg in topo.segments:
                 if seg.layer != layer:
                     continue
@@ -1091,7 +1129,13 @@ class BoardCanvasCPU(tk.Canvas):
                 if sy_max < ry0 or sy_min > ry1: continue
                 p0x, p0y = self._project(seg.x1, seg.y1, w, h)
                 p1x, p1y = self._project(seg.x2, seg.y2, w, h)
-                canvas.drawLine(p0x, p0y, p1x, p1y, paint)
+                if paint_dashed is not None and getattr(seg, "dashed", False):
+                    seg_path = _skia.Path()
+                    seg_path.moveTo(p0x, p0y)
+                    seg_path.lineTo(p1x, p1y)
+                    canvas.drawPath(seg_path, paint_dashed)
+                else:
+                    canvas.drawLine(p0x, p0y, p1x, p1y, paint)
 
         # Phase B — selected-net highlight, spanning every layer the net
         # touches. Current-layer segments get the bright TRACE_HIGHLIGHT
@@ -1099,19 +1143,22 @@ class BoardCanvasCPU(tk.Canvas):
         # their layer's palette color so it's visually obvious which
         # layer a stretch of trace is on. The graph already fuses
         # cross-layer connectivity through vias (UF unions in
-        # tvw_topology.py); we just stop filtering by layer here.
+        # tvw_topology.py); we just stop filtering by layer here. For
+        # synthetic ratsnest, dashed cross-layer edges keep their dash
+        # style even when highlighted.
         if sel_net_id is not None:
             try:
                 segs, polys = topo.geometry_on_net(sel_net_id)
             except Exception:
                 segs, polys = [], []
 
-            # Cache one Paint per (layer, role) — the loop below would
-            # otherwise allocate a Paint per segment.
-            paint_cache: Dict[Tuple[str, str], "_skia.Paint"] = {}
+            # Cache one Paint per (layer, role, dashed) — the loop below
+            # would otherwise allocate a Paint per segment.
+            paint_cache: Dict[Tuple[str, str, bool], "_skia.Paint"] = {}
 
-            def _paint_for(seg_layer: str, role: str) -> "_skia.Paint":
-                key = (seg_layer, role)
+            def _paint_for(seg_layer: str, role: str,
+                           dashed: bool = False) -> "_skia.Paint":
+                key = (seg_layer, role, dashed)
                 p = paint_cache.get(key)
                 if p is not None:
                     return p
@@ -1125,6 +1172,10 @@ class BoardCanvasCPU(tk.Canvas):
                 if role == "seg":
                     p.setStrokeWidth(2.0 if seg_layer == layer else 1.5)
                     p.setAntiAlias(True)
+                    if dashed:
+                        p.setStyle(_skia.Paint.Style.kStroke_Style)
+                        p.setPathEffect(
+                            _skia.DashPathEffect.Make([4.0, 4.0], 0.0))
                 else:  # poly
                     p.setStrokeWidth(1.0)
                     p.setAntiAlias(True)
@@ -1135,7 +1186,15 @@ class BoardCanvasCPU(tk.Canvas):
             for seg in segs:
                 p0x, p0y = self._project(seg.x1, seg.y1, w, h)
                 p1x, p1y = self._project(seg.x2, seg.y2, w, h)
-                canvas.drawLine(p0x, p0y, p1x, p1y, _paint_for(seg.layer, "seg"))
+                if getattr(seg, "dashed", False):
+                    seg_path = _skia.Path()
+                    seg_path.moveTo(p0x, p0y)
+                    seg_path.lineTo(p1x, p1y)
+                    canvas.drawPath(
+                        seg_path, _paint_for(seg.layer, "seg", dashed=True))
+                else:
+                    canvas.drawLine(
+                        p0x, p0y, p1x, p1y, _paint_for(seg.layer, "seg"))
             for poly in polys:
                 if len(poly.vertices) < 2:
                     continue
@@ -1147,6 +1206,40 @@ class BoardCanvasCPU(tk.Canvas):
                     px, py = self._project(vx, vy, w, h)
                     path.lineTo(px, py)
                 canvas.drawPath(path, _paint_for(poly.layer, "poly"))
+
+        # Phase C — via markers. Open cyan rings, viewport-culled,
+        # zoom-gated. Vias bridge TOP↔BOTTOM by definition so we draw
+        # them regardless of which layer is current — clicking one
+        # flips the view to the other side. When the via belongs to
+        # the selected net, fill with TRACE_HIGHLIGHT yellow so it
+        # pops along the net trace. Synthetic ratsnest topologies
+        # have no vias (empty list) so this loop is a no-op.
+        if self.zoom >= self.TRACE_DIMMED_ZOOM_THRESHOLD:
+            vias = getattr(topo, "vias", None) or []
+            if vias:
+                vr, vg, vb, _ = self._hex_to_rgba(self.VIA_COLOR)
+                via_paint = _skia.Paint()
+                via_paint.setColor(_skia.Color(vr, vg, vb, 255))
+                via_paint.setStyle(_skia.Paint.Style.kStroke_Style)
+                via_paint.setStrokeWidth(self.VIA_MARKER_THICKNESS_PX)
+                via_paint.setAntiAlias(True)
+                # Highlight paint (filled) for vias on the selected net.
+                hr, hg, hb, _ = self._hex_to_rgba(self.TRACE_HIGHLIGHT)
+                via_paint_hl: Optional["_skia.Paint"] = None
+                if sel_net_id is not None:
+                    via_paint_hl = _skia.Paint()
+                    via_paint_hl.setColor(_skia.Color(hr, hg, hb, 255))
+                    via_paint_hl.setStyle(_skia.Paint.Style.kFill_Style)
+                    via_paint_hl.setAntiAlias(True)
+                rpx = self.VIA_MARKER_R_PX
+                for v in vias:
+                    if v.x < rx0 or v.x > rx1: continue
+                    if v.y < ry0 or v.y > ry1: continue
+                    sx, sy = self._project(v.x, v.y, w, h)
+                    if (via_paint_hl is not None
+                            and v.net_id == sel_net_id):
+                        canvas.drawCircle(sx, sy, rpx - 0.5, via_paint_hl)
+                    canvas.drawCircle(sx, sy, rpx, via_paint)
 
         self._skia_surface.flushAndSubmit()
         # Buffer is fully opaque (we cleared with opaque BG and drew opaque
@@ -1164,7 +1257,14 @@ class BoardCanvasCPU(tk.Canvas):
     def _draw_traces_tk(self, topo, w: int, h: int) -> None:
         """Fallback path used when Skia / numpy / Pillow are unavailable.
         Identical output to the Skia path but goes through tk.create_line
-        per segment — slow at high zoom levels."""
+        per segment — slow at high zoom levels.
+
+        Synthetic ratsnest: dashed cross-layer edges use tk's `dash=(4, 4)`
+        kwarg (free — handled inside Tcl). The 70 % alpha cue from the
+        Skia path can't translate directly (tk colors are RGB-only), so
+        we leave the color as-is here; users on this fallback tier
+        already accept reduced fidelity.
+        """
         rx0, ry0, rx1, ry1 = self._viewport_world(w, h)
         layer = self._view_layer
         sel_net_id: Optional[int] = None
@@ -1188,8 +1288,13 @@ class BoardCanvasCPU(tk.Canvas):
                 if sy_max < ry0 or sy_min > ry1: continue
                 p0x, p0y = self._project(seg.x1, seg.y1, w, h)
                 p1x, p1y = self._project(seg.x2, seg.y2, w, h)
-                self.create_line(p0x, p0y, p1x, p1y,
-                                 fill=dimmed_color, width=1)
+                if getattr(seg, "dashed", False):
+                    self.create_line(p0x, p0y, p1x, p1y,
+                                     fill=dimmed_color, width=1,
+                                     dash=(4, 4))
+                else:
+                    self.create_line(p0x, p0y, p1x, p1y,
+                                     fill=dimmed_color, width=1)
         if sel_net_id is not None:
             try:
                 segs, polys = topo.geometry_on_net(sel_net_id)
@@ -1205,11 +1310,19 @@ class BoardCanvasCPU(tk.Canvas):
             for seg in segs:
                 p0x, p0y = self._project(seg.x1, seg.y1, w, h)
                 p1x, p1y = self._project(seg.x2, seg.y2, w, h)
-                self.create_line(
-                    p0x, p0y, p1x, p1y,
-                    fill=_hl_for(seg.layer),
-                    width=2 if seg.layer == layer else 1,
-                )
+                if getattr(seg, "dashed", False):
+                    self.create_line(
+                        p0x, p0y, p1x, p1y,
+                        fill=_hl_for(seg.layer),
+                        width=2 if seg.layer == layer else 1,
+                        dash=(4, 4),
+                    )
+                else:
+                    self.create_line(
+                        p0x, p0y, p1x, p1y,
+                        fill=_hl_for(seg.layer),
+                        width=2 if seg.layer == layer else 1,
+                    )
             for poly in polys:
                 pts: List[float] = []
                 for vx, vy in poly.vertices:
@@ -1218,6 +1331,30 @@ class BoardCanvasCPU(tk.Canvas):
                 if len(pts) >= 4:
                     self.create_line(
                         *pts, fill=_hl_for(poly.layer), width=1,
+                    )
+
+        # Via markers. See `_draw_traces_skia` Phase C for the design
+        # rationale; this is the simpler tk fallback. Open cyan ring
+        # via create_oval. When on selected net, also draw a smaller
+        # filled yellow disc inside.
+        if self.zoom >= self.TRACE_DIMMED_ZOOM_THRESHOLD:
+            vias = getattr(topo, "vias", None) or []
+            if vias:
+                rpx = self.VIA_MARKER_R_PX
+                inner_r = max(1.0, rpx - 1.5)
+                for v in vias:
+                    if v.x < rx0 or v.x > rx1: continue
+                    if v.y < ry0 or v.y > ry1: continue
+                    sx, sy = self._project(v.x, v.y, w, h)
+                    if sel_net_id is not None and v.net_id == sel_net_id:
+                        self.create_oval(
+                            sx - inner_r, sy - inner_r,
+                            sx + inner_r, sy + inner_r,
+                            fill=self.TRACE_HIGHLIGHT, outline="",
+                        )
+                    self.create_oval(
+                        sx - rpx, sy - rpx, sx + rpx, sy + rpx,
+                        outline=self.VIA_COLOR, width=1,
                     )
 
     def _draw_pins(self, c: Component, w: int, h: int) -> None:
@@ -1318,6 +1455,16 @@ class BoardCanvasCPU(tk.Canvas):
                 self._on_measure_change()
             return
 
+        # Via hit-test: only when traces are visible AND the click radius
+        # finds a via. Wins over component selection because vias are
+        # smaller targets than components and clicking near one is
+        # almost always intentional (the user wants to "punch through"
+        # to the other layer). Flip layer + bail.
+        via = self._find_via_at(cx, cy)
+        if via is not None:
+            self._flip_layer_for_via(via)
+            return
+
         if self._selected_refdes:
             comp = self.board.components.get(self._selected_refdes)
             if comp and comp.layer == self._view_layer:
@@ -1344,6 +1491,59 @@ class BoardCanvasCPU(tk.Canvas):
             self._redraw()
             if self._on_pin_select:
                 self._on_pin_select(None)
+
+    def _find_via_at(self, cx: int, cy: int) -> Optional[Any]:
+        """Hit-test the click against rendered vias. Returns the closest
+        Via within VIA_CLICK_RADIUS_PX, or None.
+
+        Gated on `show_traces`: vias aren't drawn when traces are off,
+        so they shouldn't be clickable either. Synthetic ratsnest
+        topologies have no vias (empty list); the loop short-circuits.
+
+        We don't viewport-cull here — the per-via screen-distance check
+        is cheap enough (a few thousand subtractions and a single sqrt
+        per visible via) that it stays well under 1 ms even on a
+        Z490 with 9 k vias. Skipping cull keeps the code small."""
+        if not self._show_traces:
+            return None
+        topo = getattr(self.board, "topology", None)
+        if topo is None:
+            return None
+        vias = getattr(topo, "vias", None) or []
+        if not vias:
+            return None
+        w, h = self.winfo_width(), self.winfo_height()
+        r = self.VIA_CLICK_RADIUS_PX
+        r2 = r * r
+        best = None
+        best_d2 = r2 + 1
+        for v in vias:
+            sx, sy = self._project(v.x, v.y, w, h)
+            ddx = sx - cx
+            ddy = sy - cy
+            if abs(ddx) > r or abs(ddy) > r:
+                continue
+            d2 = ddx * ddx + ddy * ddy
+            if d2 < best_d2:
+                best_d2 = d2
+                best = v
+        return best
+
+    def _flip_layer_for_via(self, via: Any) -> None:
+        """Click on a via → flip the view to the OTHER side of this via.
+
+        For a 2-layer board (the common case) this is just TOP↔BOTTOM.
+        For multi-layer boards (GPU PCBs with INNER_n layers) the via
+        is still strictly TOP↔BOTTOM — we don't model inner-layer
+        microvias yet — so the flip rule is the same: if currently
+        TOP, go to BOTTOM; otherwise go to TOP. An inner-layer view
+        flips to TOP (so the user lands on a side the via actually
+        traverses).
+        """
+        cur = self._view_layer
+        target = "BOTTOM" if cur == "TOP" else "TOP"
+        if target != cur:
+            self.set_view_layer(target)
 
     def _find_pin_at(
         self, comp: Component, shape: Any, cx: int, cy: int
@@ -1498,6 +1698,10 @@ if _GL_AVAILABLE:
         TRACE_DIMMED_BOTTOM = BoardCanvasCPU.TRACE_DIMMED_BOTTOM
         TRACE_HIGHLIGHT = BoardCanvasCPU.TRACE_HIGHLIGHT
         TRACE_DIMMED_ZOOM_THRESHOLD = BoardCanvasCPU.TRACE_DIMMED_ZOOM_THRESHOLD
+        VIA_COLOR = BoardCanvasCPU.VIA_COLOR
+        VIA_MARKER_R_PX = BoardCanvasCPU.VIA_MARKER_R_PX
+        VIA_MARKER_THICKNESS_PX = BoardCanvasCPU.VIA_MARKER_THICKNESS_PX
+        VIA_CLICK_RADIUS_PX = BoardCanvasCPU.VIA_CLICK_RADIUS_PX
         GHOST_OUTLINE = BoardCanvasCPU.GHOST_OUTLINE
         MIN_ZOOM = BoardCanvasCPU.MIN_ZOOM
         MAX_ZOOM = BoardCanvasCPU.MAX_ZOOM
@@ -2742,21 +2946,68 @@ if _GL_AVAILABLE:
             # We negate Y at build time so the Skia matrix is a pure
             # positive-scale transform — Skia's y grows down, board y
             # grows up.
+            #
+            # Synthetic ratsnest: split each layer into two paths,
+            # `paths[layer]` (solid edges) and `paths_dashed[layer]`
+            # (cross-layer edges drawn dashed). Two drawPath calls per
+            # layer in the GL render — negligible cost vs. the single
+            # call for real-trace topology, but keeps the dashed style
+            # entirely on the cross-layer minority. Real TVW topology
+            # has no `dashed` field so we skip the split there.
+            # Detect dashed-edge column. Numpy fast path: read straight
+            # from `_seg_arrays["dashed"]` if it's there. Dataclass
+            # fallback (no `_seg_arrays`): scan the materialised list
+            # for a `dashed` attribute. Real TVW topology has neither
+            # so this all short-circuits to `has_dashed = False`.
+            #
+            # `_seg_arrays` is a dict-of-arrays in both TVW and the
+            # synthetic ratsnest, so `in` is a simple key-membership
+            # test, not a numpy structured-dtype lookup.
+            dashed_arr = None
+            if seg_arr is not None and "dashed" in seg_arr:
+                dashed_arr = seg_arr["dashed"]
+            elif seg_arr is None:
+                # We came through the dataclass-materialisation branch
+                # above; `segs` is in scope.
+                if any(getattr(s, "dashed", False) for s in segs):
+                    dashed_arr = _np.fromiter(
+                        (1 if getattr(s, "dashed", False) else 0
+                         for s in segs),
+                        count=n, dtype=_np.uint8,
+                    )
+            has_dashed = (
+                dashed_arr is not None and bool(dashed_arr.any())
+            )
             paths: Dict[str, "_skia.Path"] = {}
+            paths_dashed: Dict[str, "_skia.Path"] = {}
             x1_l = x1.tolist(); y1_l = y1.tolist()
             x2_l = x2.tolist(); y2_l = y2.tolist()
-            for i in range(n):
-                ln = seg_layer[i]
-                p = paths.get(ln)
-                if p is None:
-                    p = _skia.Path()
-                    paths[ln] = p
-                p.moveTo(x1_l[i], -y1_l[i])
-                p.lineTo(x2_l[i], -y2_l[i])
+            if has_dashed:
+                d_l = dashed_arr.tolist()
+                for i in range(n):
+                    ln = seg_layer[i]
+                    bucket = paths_dashed if d_l[i] else paths
+                    p = bucket.get(ln)
+                    if p is None:
+                        p = _skia.Path()
+                        bucket[ln] = p
+                    p.moveTo(x1_l[i], -y1_l[i])
+                    p.lineTo(x2_l[i], -y2_l[i])
+            else:
+                for i in range(n):
+                    ln = seg_layer[i]
+                    p = paths.get(ln)
+                    if p is None:
+                        p = _skia.Path()
+                        paths[ln] = p
+                    p.moveTo(x1_l[i], -y1_l[i])
+                    p.lineTo(x2_l[i], -y2_l[i])
             cache = {
                 "x1": x1, "y1": y1, "x2": x2, "y2": y2,
                 "net_id": net_id, "layer": seg_layer,
                 "paths": paths,
+                "paths_dashed": paths_dashed,
+                "has_dashed": has_dashed,
             }
             try:
                 topo._gl_seg_arrays = cache
@@ -2932,17 +3183,40 @@ if _GL_AVAILABLE:
 
             arrs = self._segments_arrays(topo)
 
+            # Synthetic ratsnest cues (real TVW topology has no
+            # `is_synthetic` so this all branches off cleanly).
+            is_synthetic = getattr(topo, "is_synthetic", False)
+            synth_alpha_scale = 0.7 if is_synthetic else 1.0
+            paths_dashed = arrs.get("paths_dashed") or {}
+            has_dashed = bool(arrs.get("has_dashed"))
+
             # ---- Phase A: dimmed all-traces (matrix-transformed) ---------
             # Only renders the *current* layer's pre-built world-space
             # path. Inner-layer views show the inner copper; on-screen
             # rendering of every layer's all-traces would be visually
             # overwhelming and isn't what the user is asking for.
+            #
+            # For synthetic ratsnest the layer's geometry is split into
+            # `paths[layer]` (solid) and `paths_dashed[layer]` (dashed
+            # cross-layer hints). One drawPath each, both under the
+            # same world-to-screen matrix. The dashed path uses Skia's
+            # PathEffect — a fixed-on-screen dash period rather than a
+            # world-space one, since the matrix transform would
+            # otherwise stretch the dashes at high zoom.
             paths = arrs["paths"]
             if (self.zoom >= self.TRACE_DIMMED_ZOOM_THRESHOLD
-                    and layer in paths):
-                world_path = paths[layer]
+                    and (layer in paths or layer in paths_dashed)):
+                base_color = self._hex_to_skia(_layer_color(layer, dim=True))
+                # Apply synthetic alpha modulation by reconstructing the
+                # color with scaled A. _hex_to_skia returns an int; we
+                # split / rebuild via SkColor's component layout.
+                if is_synthetic:
+                    a = (base_color >> 24) & 0xFF
+                    rgb = base_color & 0x00FFFFFF
+                    a = int(a * synth_alpha_scale)
+                    base_color = (a << 24) | rgb
                 paint = _skia.Paint()
-                paint.setColor(self._hex_to_skia(_layer_color(layer, dim=True)))
+                paint.setColor(base_color)
                 paint.setStyle(_skia.Paint.Style.kStroke_Style)
                 paint.setStrokeWidth(1.0)
                 paint.setAntiAlias(False)
@@ -2961,7 +3235,25 @@ if _GL_AVAILABLE:
                 matrix = self._world_to_screen_matrix()
                 canvas.save()
                 canvas.concat(matrix)
-                canvas.drawPath(world_path, paint)
+                if layer in paths:
+                    canvas.drawPath(paths[layer], paint)
+                if has_dashed and layer in paths_dashed:
+                    # Dash period scaled to compensate the matrix —
+                    # otherwise the dashes would render as e.g. 32 px
+                    # at zoom 8.0. DashPathEffect.Make takes world-
+                    # space lengths; divide the on-screen target
+                    # (4 px) by the effective scale.
+                    on_off = 4.0
+                    if effective_scale > 1e-6:
+                        on_off = 4.0 / effective_scale
+                    dash_paint = _skia.Paint()
+                    dash_paint.setColor(base_color)
+                    dash_paint.setStyle(_skia.Paint.Style.kStroke_Style)
+                    dash_paint.setStrokeWidth(paint.getStrokeWidth())
+                    dash_paint.setAntiAlias(False)
+                    dash_paint.setPathEffect(
+                        _skia.DashPathEffect.Make([on_off, on_off], 0.0))
+                    canvas.drawPath(paths_dashed[layer], dash_paint)
                 canvas.restore()
 
             # ---- Phase B: highlight for the selected net -----------------
@@ -2977,14 +3269,17 @@ if _GL_AVAILABLE:
                 except Exception:
                     segs, polys = [], []
 
-                # Group segments by their layer. One drawPath per layer
-                # keeps batching efficient — ~1 paint+drawPath per layer
-                # per frame instead of one paint per segment.
-                segs_by_layer: Dict[str, List] = {}
+                # Group segments by (layer, dashed). One drawPath per
+                # bucket keeps batching efficient — ~1 paint+drawPath
+                # per (layer, dashed) per frame. For real TVW topology
+                # the dashed bucket stays empty and the loop reduces
+                # to one drawPath per layer as before.
+                segs_by_bucket: Dict[Tuple[str, bool], List] = {}
                 for seg in segs:
-                    segs_by_layer.setdefault(seg.layer, []).append(seg)
+                    key = (seg.layer, bool(getattr(seg, "dashed", False)))
+                    segs_by_bucket.setdefault(key, []).append(seg)
 
-                for seg_layer, seg_list in segs_by_layer.items():
+                for (seg_layer, is_dashed), seg_list in segs_by_bucket.items():
                     is_current = (seg_layer == layer)
                     color_hex = (self.TRACE_HIGHLIGHT if is_current
                                  else _layer_color(seg_layer, dim=False))
@@ -2993,6 +3288,12 @@ if _GL_AVAILABLE:
                     seg_paint.setStyle(_skia.Paint.Style.kStroke_Style)
                     seg_paint.setStrokeWidth(2.0 if is_current else 1.5)
                     seg_paint.setAntiAlias(True)
+                    if is_dashed:
+                        # Highlighted-net dashed segments: project-space
+                        # dashing (4 px on / 4 px off) since the path is
+                        # built in screen coords below, not world coords.
+                        seg_paint.setPathEffect(
+                            _skia.DashPathEffect.Make([4.0, 4.0], 0.0))
 
                     sx1l: List[float] = []
                     sy1l: List[float] = []
@@ -3134,6 +3435,52 @@ if _GL_AVAILABLE:
                             any_stub = True
                         if any_stub:
                             canvas.drawPath(stub_path, stub_paint)
+
+            # ---- Phase D: via markers ---------------------------------
+            # Open cyan rings at every via XY, viewport-culled. Vias
+            # bridge TOP↔BOTTOM by definition so we draw them on every
+            # layer view — clicking a via flips the active layer.
+            # Drawn in screen space (per-frame project) rather than via
+            # the matrix-concat trick used for the dimmed all-traces
+            # path: vias are sparse (typically <2 % of pad count, tens
+            # of thousands worst case), and culling + a single drawPath
+            # of small ovals stays under 2 ms on a Z490 at zoom 8.
+            #
+            # Synthetic ratsnest topologies have no vias (`vias=[]`),
+            # so the loop is a no-op there.
+            if self.zoom >= self.TRACE_DIMMED_ZOOM_THRESHOLD:
+                vias = getattr(topo, "vias", None) or []
+                if vias:
+                    rx0v, ry0v, rx1v, ry1v = self._viewport_world(w, h)
+                    via_paint = _skia.Paint()
+                    via_paint.setColor(self._hex_to_skia(self.VIA_COLOR))
+                    via_paint.setStyle(_skia.Paint.Style.kStroke_Style)
+                    via_paint.setStrokeWidth(self.VIA_MARKER_THICKNESS_PX)
+                    via_paint.setAntiAlias(True)
+                    # Highlight (yellow fill) for vias on selected net.
+                    via_paint_hl: Optional["_skia.Paint"] = None
+                    if sel_net_id is not None:
+                        via_paint_hl = _skia.Paint()
+                        via_paint_hl.setColor(
+                            self._hex_to_skia(self.TRACE_HIGHLIGHT))
+                        via_paint_hl.setStyle(_skia.Paint.Style.kFill_Style)
+                        via_paint_hl.setAntiAlias(True)
+                    rpx = self.VIA_MARKER_R_PX
+                    inner_r = max(1.0, rpx - 1.0)
+                    # Two passes — fills first (under the rings) so the
+                    # cyan outline visually frames the yellow disc.
+                    if via_paint_hl is not None:
+                        for v in vias:
+                            if v.x < rx0v or v.x > rx1v: continue
+                            if v.y < ry0v or v.y > ry1v: continue
+                            if v.net_id != sel_net_id: continue
+                            sx, sy = self._project(v.x, v.y, w, h)
+                            canvas.drawCircle(sx, sy, inner_r, via_paint_hl)
+                    for v in vias:
+                        if v.x < rx0v or v.x > rx1v: continue
+                        if v.y < ry0v or v.y > ry1v: continue
+                        sx, sy = self._project(v.x, v.y, w, h)
+                        canvas.drawCircle(sx, sy, rpx, via_paint)
 
         def _draw_status_text(self, canvas, w: int, h: int) -> None:
             zoom_pct = int(self.zoom * 100)
@@ -3368,6 +3715,13 @@ if _GL_AVAILABLE:
                     self._on_measure_change()
                 return
 
+            # Via hit-test runs before component pick. See BoardCanvasCPU
+            # ._handle_click for the rationale.
+            via = self._find_via_at(cx, cy)
+            if via is not None:
+                self._flip_layer_for_via(via)
+                return
+
             if self._selected_refdes:
                 comp = self.board.components.get(self._selected_refdes)
                 if comp and comp.layer == self._view_layer:
@@ -3474,6 +3828,42 @@ if _GL_AVAILABLE:
             if mm >= 1.0:
                 return f"{mm:.3f} mm  ({mil:.1f} mil)"
             return f"{mm * 1000:.1f} um  ({mil:.2f} mil)"
+
+        def _find_via_at(self, cx: int, cy: int) -> Optional[Any]:
+            """GL-tier mirror of BoardCanvasCPU._find_via_at. See that
+            method for the rationale; only the projection helper differs
+            (`_project` from this class)."""
+            if not self._show_traces:
+                return None
+            topo = getattr(self.board, "topology", None)
+            if topo is None:
+                return None
+            vias = getattr(topo, "vias", None) or []
+            if not vias:
+                return None
+            w, h = self.winfo_width(), self.winfo_height()
+            r = self.VIA_CLICK_RADIUS_PX
+            r2 = r * r
+            best = None
+            best_d2 = r2 + 1
+            for v in vias:
+                sx, sy = self._project(v.x, v.y, w, h)
+                ddx = sx - cx
+                ddy = sy - cy
+                if abs(ddx) > r or abs(ddy) > r:
+                    continue
+                d2 = ddx * ddx + ddy * ddy
+                if d2 < best_d2:
+                    best_d2 = d2
+                    best = v
+            return best
+
+        def _flip_layer_for_via(self, via: Any) -> None:
+            """GL-tier mirror of BoardCanvasCPU._flip_layer_for_via."""
+            cur = self._view_layer
+            target = "BOTTOM" if cur == "TOP" else "TOP"
+            if target != cur:
+                self.set_view_layer(target)
 
         def _find_pin_at(
             self, comp: Component, shape: Any, cx: int, cy: int,
@@ -4224,7 +4614,7 @@ class ViewerApp(tk.Tk):
         self.canvas.set_select_callback(self._on_canvas_select)
         self.canvas.set_layer_change_callback(self._on_canvas_layer_change)
         self.canvas.set_pin_select_callback(self._on_canvas_pin_select)
-        self.canvas.set_measure_change_callback(self._update_status)
+        self.canvas.set_measure_change_callback(self._on_measure_change)
 
         if board_path:
             _add_recent(board_path)
@@ -4288,6 +4678,8 @@ class ViewerApp(tk.Tk):
                               command=self._toggle_layer)
         view_menu.add_command(label="Toggle traces (T)",
                               command=self._toggle_traces)
+        view_menu.add_command(label="Toggle measure (M)",
+                              command=self._toggle_measure)
         view_menu.add_separator()
         view_menu.add_command(label="Mirror X",
                               command=lambda: self.canvas.toggle_mirror_x())
@@ -4348,6 +4740,13 @@ class ViewerApp(tk.Tk):
         self.traces_btn = ttk.Button(toolbar, text="Traces: OFF",
                                      command=self._toggle_traces, width=14)
         self.traces_btn.pack(side="right", padx=(4, 0))
+        # Measurement-mode toggle. Label tracks `_measure_mode` via
+        # `_on_measure_change` (also wired to `_update_status` for the
+        # in-canvas readout). Width matched to the traces button so the
+        # two side-by-side toggles read as a unit.
+        self.measure_btn = ttk.Button(toolbar, text="Measure: OFF",
+                                      command=self._toggle_measure, width=14)
+        self.measure_btn.pack(side="right", padx=(4, 0))
         self.reset_btn = ttk.Button(toolbar, text="Reset view",
                                     command=lambda: self.canvas.reset_view())
         self.reset_btn.pack(side="right", padx=(4, 0))
@@ -4612,7 +5011,10 @@ class ViewerApp(tk.Tk):
     def _toggle_measure(self) -> None:
         """Enter or leave measurement mode. Component selection clears
         on entry so the new mode-cursor is unambiguous; mode exits with
-        another M press or via Esc."""
+        another M press or via Esc.
+
+        Button text + status bar both update from `_on_measure_change`
+        which the canvas fires after `set_measure_mode()` flips state."""
         on = not self.canvas.measure_mode
         if on:
             # Drop any active component / pin selection so the cursor
@@ -4620,6 +5022,15 @@ class ViewerApp(tk.Tk):
             self.canvas._selected_refdes = None
             self.canvas._selected_pin = None
         self.canvas.set_measure_mode(on)
+
+    def _on_measure_change(self) -> None:
+        """Canvas callback: keep the toolbar Measure button label and the
+        status-bar readout in sync with `canvas.measure_mode` and the
+        current measurement points. Fired on mode toggle, point placed,
+        hover moved, and clear."""
+        self.measure_btn.config(
+            text=f"Measure: {'ON' if self.canvas.measure_mode else 'OFF'}",
+        )
         self._update_status()
 
     def _on_escape(self) -> None:
@@ -4636,10 +5047,19 @@ class ViewerApp(tk.Tk):
         n_top = sum(1 for c in self.board.components.values() if c.layer == "TOP")
         n_bot = n_comp - n_top
         layer = self.canvas.view_layer
+        # Synthetic-ratsnest cue: when traces are on AND the active
+        # topology is the synthetic MST (no real routed-trace data on
+        # this board), tag the layer label so the user never mistakes
+        # the straight-line illustration for actual routing.
+        layer_label = layer
+        if self.canvas.show_traces:
+            topo = getattr(self.board, "_topology", None)
+            if topo is not None and getattr(topo, "is_synthetic", False):
+                layer_label = f"{layer} (ratsnest)"
         sel = self.canvas.selected_refdes
         pin = self.canvas.selected_pin
         bits = [
-            f"layer: {layer}",
+            f"layer: {layer_label}",
             f"components: {n_comp} ({n_top} TOP / {n_bot} BOTTOM)",
             f"nets: {n_net}",
         ]

@@ -227,35 +227,49 @@ class BoardModel:
 
     @property
     def topology_available(self) -> bool:
-        """True if a topology loader was attached (i.e. `topology` *can*
-        be loaded). False for parsers that don't decode geometry — those
-        callers should hide trace UI rather than wait on a build that
-        will never produce anything useful.
+        """True if `topology` can produce *something* — either a real
+        routed-trace graph (parser attached a loader) or a synthetic
+        ratsnest built from `self.signals`. False only when the model
+        has neither a loader nor any pin-net mapping to ratsnest from.
 
-        Cheap: only checks the loader presence, doesn't trigger a build."""
-        return self._topology_loader is not None
+        Cheap: only checks loader presence and signal-dict emptiness;
+        doesn't trigger a build."""
+        if self._topology_loader is not None:
+            return True
+        return bool(self.signals)
 
     @property
     def topology(self):
-        """Return the cached `TraceGraph` for this board, building it on
-        first access. Subsequent accesses return the cached instance.
+        """Return the cached topology graph for this board, building it
+        on first access. Subsequent accesses return the cached instance.
 
-        Raises RuntimeError if no loader was attached — call
-        `topology_available` first to avoid that. Build is 3-6 s per
-        board (lots of binary scanning); cache it for the life of the
-        BoardModel.
+        Three paths:
+          * Real loader attached (TVW today)        -> call the loader.
+          * No loader, signals present (CAD/BRD/    -> build a synthetic
+            FZ/XZZPCB)                                ratsnest via
+                                                      `ratsnest.build_synthetic_topology`.
+          * Neither loader nor signals               -> RuntimeError.
+            (e.g. an empty/corrupt parse).
+
+        Synthetic builds run 30-80 ms on a typical motherboard; real
+        TVW builds run 3-6 s. Either way the result is cached for the
+        life of the BoardModel — call `topology_available` first if you
+        want to avoid forcing the build.
         """
         if self._topology is not None:
             return self._topology
-        if self._topology_loader is None:
-            raise RuntimeError(
-                "BoardModel has no trace topology loader. The parser that "
-                "produced this model doesn't decode trace geometry, so "
-                "topology features are unavailable. Check "
-                "`topology_available` before calling `.topology`."
-            )
-        self._topology = self._topology_loader()
-        return self._topology
+        if self._topology_loader is not None:
+            self._topology = self._topology_loader()
+            return self._topology
+        if self.signals:
+            from ratsnest import build_synthetic_topology
+            self._topology = build_synthetic_topology(self)
+            return self._topology
+        raise RuntimeError(
+            "BoardModel has no trace topology loader and no pin-net "
+            "mapping (`signals`) to synthesize a ratsnest from. Check "
+            "`topology_available` before calling `.topology`."
+        )
 
     # ------------------------------------------------------------------
     # Diagnostic helpers built on top of the topology. All of them

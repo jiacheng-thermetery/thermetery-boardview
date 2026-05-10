@@ -282,6 +282,27 @@ class Polyline:
     layer: str
 
 
+@dataclass(slots=True)
+class Via:
+    """A through-board layer transition. Inferred from the existing
+    via-bridging pass: a TOP pad whose XY matches a BOTTOM pad within
+    `via_tol`. The Via record itself is not stored in the TVW file —
+    we synthesize it from the pad geometry so the UI can render via
+    markers and flip layers when the user clicks one.
+
+    via_id is a stable index assigned during extraction (sequential).
+    (x, y) is the midpoint of the two pads' centres so the marker sits
+    exactly on the via, not biased to either pad. net_id is shared by
+    construction; a via that bridged dissimilar nets would be a wiring
+    error in the source file, not something we represent here."""
+    via_id: int
+    x: int
+    y: int
+    net_id: int
+    top_pad_id: int
+    bot_pad_id: int
+
+
 # --------------------------------------------------------------------------
 # Extraction. Re-uses Phase 1 scanners; we walk the run-bytes ourselves
 # to materialise concrete records (the scanners only return offset/count).
@@ -824,6 +845,12 @@ class TraceGraph:
         default=None, repr=False, compare=False)
     _polys_cache: Optional[List[Polyline]] = field(
         default=None, repr=False, compare=False)
+    # Vias are synthesized after build (not from the TVW file directly) by
+    # `_extract_vias`. Empty until then. Same shape as `pads`/`segments`:
+    # public list of dataclass instances. We don't have a numpy-array
+    # mirror because vias are sparse (typically <2 % of pad count) and
+    # never iterated in tight per-segment loops.
+    vias: List["Via"] = field(default_factory=list)
     net_names: List[str] = field(default_factory=list)
 
     endpoint_tol: int = 50
@@ -912,7 +939,13 @@ class TraceGraph:
     #     more layers (e.g. GPU PCBs) it's ["TOP", "BOTTOM", "INNER_1",
     #     "INNER_2", ...]. v8 caches lacked the field and would unpickle
     #     missing it; force rebuild so the field gets populated.
-    _CACHE_VERSION = 9
+    # v10: Phase 2 — explicit Via records. TraceGraph gained a `vias`
+    #     field (List[Via]) populated by `_extract_vias` after build.
+    #     v9 caches lacked the field, so unpickling them succeeds (the
+    #     dataclass tolerates missing list-fields by leaving the default
+    #     factory value) but `vias` ends up empty even on boards that
+    #     have many vias. Force rebuild so the via list gets populated.
+    _CACHE_VERSION = 10
 
     # ---- lazy dataclass-list accessors ----------------------------------
     # These build Pad / Segment / Polyline instances on first access from
@@ -1442,12 +1475,99 @@ class TraceGraph:
         self.propagation_conflicts = result["propagation_conflicts"]
         self.propagation_changes = result["propagation_changes"]
 
+        # Materialise Via records. The C side already did the UF unions
+        # when it found via-bridges; `_extract_vias` re-runs the same
+        # bucket scan in Python to build the public Via list (the C
+        # struct doesn't return them). Re-unions are no-ops on already
+        # merged nodes. C's reported via_count is preserved above; the
+        # extracted Via list should match it 1:1 (same algorithm, same
+        # tol) but we don't assert — safer to surface whatever Python
+        # finds even if a future C-side change drifts.
+        self._extract_vias()
+
         # Defer SpatialHash population. `net_at()` is the only consumer;
         # most builds never call it, so we build it lazily on first
         # access. Saves ~200 ms on the cold path. See `_ensure_spatial`.
         self._spatial = None
 
         return True
+
+    def _extract_vias(self) -> int:
+        """Synthesize Via records from same-XY pads on opposite layers
+        and (defensively) ensure the corresponding Union-Find unions
+        exist. Idempotent — calling twice rebuilds `self.vias` and
+        re-runs unions; already-merged nodes are no-ops.
+
+        Algorithm matches the original inline pass: bucket TOP pads by
+        a (via_tol)-grid, probe each BOTTOM pad against the 3x3
+        neighbourhood, take the closest match within tol². Each match
+        becomes one Via record; via_id assigns sequentially in BOTTOM-
+        iteration order (stable for a given pad order, not stable
+        across rebuilds with different pad sets).
+
+        Returns the number of vias found. Used by both `_build` (where
+        unions are first established) and `_build_native` (where the C
+        path already did the unions and this just materialises records)."""
+        self.vias = []
+        if self.via_tol <= 0 or not self.pads:
+            return 0
+        via_cell = max(1, self.via_tol)
+        top_pads_by_cell: Dict[Tuple[int, int], List[int]] = defaultdict(list)
+        pads_by_id: Dict[int, Pad] = {p.pad_id: p for p in self.pads}
+        for pad in self.pads:
+            if pad.layer == "TOP":
+                gx, gy = pad.x // via_cell, pad.y // via_cell
+                top_pads_by_cell[(gx, gy)].append(pad.pad_id)
+
+        tol2 = self.via_tol * self.via_tol
+        next_via_id = 0
+        for pad in self.pads:
+            if pad.layer != "BOTTOM":
+                continue
+            gx, gy = pad.x // via_cell, pad.y // via_cell
+            best_id = -1
+            best_d2 = tol2 + 1
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    cell = top_pads_by_cell.get((gx + dx, gy + dy))
+                    if not cell:
+                        continue
+                    for tp_id in cell:
+                        tp = pads_by_id[tp_id]
+                        ddx = tp.x - pad.x
+                        ddy = tp.y - pad.y
+                        d2 = ddx * ddx + ddy * ddy
+                        if d2 <= tol2 and d2 < best_d2:
+                            best_d2 = d2
+                            best_id = tp_id
+            if best_id < 0:
+                continue
+            tp = pads_by_id[best_id]
+            # Midpoint of the two pad centres — a sub-via_tol shift but
+            # makes the marker sit between the two pads instead of
+            # biasing to either layer's recorded centre.
+            cx = (tp.x + pad.x) // 2
+            cy = (tp.y + pad.y) // 2
+            # Net id: prefer non-zero (zero is "untagged" on most files
+            # except X570). Both pads should agree by construction.
+            nid = tp.net_id or pad.net_id
+            self.vias.append(Via(
+                via_id=next_via_id,
+                x=cx, y=cy,
+                net_id=nid,
+                top_pad_id=best_id,
+                bot_pad_id=pad.pad_id,
+            ))
+            next_via_id += 1
+            # Defensive UF union — no-op when C path already merged
+            # these nodes. _pad_node may not be populated on cache-
+            # loaded graphs that skipped both build paths; gate on it.
+            if self._uf is not None and self._pad_node:
+                top_node = self._pad_node.get(best_id, -1)
+                bot_node = self._pad_node.get(pad.pad_id, -1)
+                if top_node >= 0 and bot_node >= 0:
+                    self._uf.union(top_node, bot_node)
+        return next_via_id
 
     def _ensure_spatial(self) -> "SpatialHash":
         """Lazy-build the SpatialHash from current node positions.
@@ -1539,47 +1659,11 @@ class TraceGraph:
 
         # ---- Step 4: cross-layer bridging via vias ---------------------
         # A via is a pad whose XY is matched by a pad on the OTHER layer
-        # within via_tol. Bridge those nodes' components.
-        # We bucket TOP pads by a (via_tol)-grid then probe BOTTOM pads
-        # against it. O(N + M) instead of O(N*M).
-        via_cell = max(1, self.via_tol)
-        top_pads_by_cell: Dict[Tuple[int, int], List[int]] = defaultdict(list)
-        for pad in self.pads:
-            if pad.layer == "TOP":
-                gx, gy = pad.x // via_cell, pad.y // via_cell
-                top_pads_by_cell[(gx, gy)].append(pad.pad_id)
-
-        via_count = 0
-        tol2 = self.via_tol * self.via_tol
-        # Map pad_id -> Pad for quick lookup.
-        pads_by_id = {p.pad_id: p for p in self.pads}
-        for pad in self.pads:
-            if pad.layer != "BOTTOM":
-                continue
-            gx, gy = pad.x // via_cell, pad.y // via_cell
-            best_id = -1
-            best_d2 = tol2 + 1
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    cell = top_pads_by_cell.get((gx + dx, gy + dy))
-                    if not cell:
-                        continue
-                    for tp_id in cell:
-                        tp = pads_by_id[tp_id]
-                        ddx = tp.x - pad.x
-                        ddy = tp.y - pad.y
-                        d2 = ddx * ddx + ddy * ddy
-                        if d2 <= tol2 and d2 < best_d2:
-                            best_d2 = d2
-                            best_id = tp_id
-            if best_id >= 0:
-                # Bridge this BOTTOM pad's node with the TOP pad's node.
-                self._uf.union(
-                    self._pad_node[pad.pad_id],
-                    self._pad_node[best_id],
-                )
-                via_count += 1
-        self._via_count = via_count
+        # within via_tol. `_extract_vias` materialises a Via record per
+        # match (so the UI can render markers / handle clicks) AND
+        # unions the corresponding pad nodes — that's why we call it
+        # here instead of after the build is done.
+        self._via_count = self._extract_vias()
 
         # ---- Step 4b: same-net pad cluster fusion ------------------
         # The TVW format records multiple distinct pad entries for one
