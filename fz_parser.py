@@ -548,13 +548,46 @@ def _parse_extracta(text: str) -> BoardModel:
     pins_by_refdes: Dict[str, List[Dict[str, str]]] = {}
     for rec in pin_records:
         refdes = rec.get("REFDES", "").strip()
-        net = rec.get("NET_NAME", "").strip()
         pin_num = rec.get("PIN_NUMBER", "").strip()
         if not refdes or not pin_num:
             continue
         pins_by_refdes.setdefault(refdes, []).append(rec)
-        if net:
-            model.signals.setdefault(net, []).append((refdes, pin_num))
+
+    # Decide per-component canonical pin names. ASRock-style Allegro
+    # Extracta exports carry distinct PIN_NUMBER values per pin and we
+    # honour them. ASUS-style exports routinely emit the same single
+    # placeholder ("0") for every pin of a multi-pin component — see
+    # GitHub issue #2. The Net tab's tk.Treeview iid is `{refdes}__{pin}`
+    # so duplicate names within one component would silently fail to
+    # insert (`tk.TclError` is swallowed), and `BoardCanvas.select_pin`
+    # linear-scans by pin name and always lands on the first match —
+    # together those make every pin row past the first unclickable.
+    # When we detect within-component collisions, rebuild that one
+    # component's pin names as a 1..N sequence in record order; the
+    # underlying file didn't carry a real number so any consistent
+    # injection is acceptable, and integer indices keep the Pin column
+    # in the Net tab readable. ASRock components (no collisions) keep
+    # their original PIN_NUMBER values.
+    canonical_pin_name: Dict[Tuple[str, int], str] = {}
+    for refdes, recs in pins_by_refdes.items():
+        raw_names = [r["PIN_NUMBER"].strip() for r in recs]
+        if len(set(raw_names)) == len(raw_names):
+            for i, name in enumerate(raw_names):
+                canonical_pin_name[(refdes, i)] = name
+        else:
+            for i in range(len(recs)):
+                canonical_pin_name[(refdes, i)] = str(i + 1)
+
+    # Build signals from the canonical names (not the raw PIN_NUMBER).
+    # Walk records in pins_by_refdes insertion order so the per-record
+    # index matches what the Shape build below assigns to local_pins.
+    for refdes, recs in pins_by_refdes.items():
+        for i, rec in enumerate(recs):
+            net = rec.get("NET_NAME", "").strip()
+            if net:
+                model.signals.setdefault(net, []).append(
+                    (refdes, canonical_pin_name[(refdes, i)])
+                )
 
     # ASUS variant: components carry no SYM_X/SYM_Y. Fill them in from
     # the centroid of the component's pin world coords. Centroid is the
@@ -633,7 +666,7 @@ def _parse_extracta(text: str) -> BoardModel:
         if comp_pins:
             theta = math.radians(-comp.rotation)
             ct, st = math.cos(theta), math.sin(theta)
-            for pr in comp_pins:
+            for i, pr in enumerate(comp_pins):
                 try:
                     px = _parse_float(pr.get("PIN_X", "0"))
                     py = _parse_float(pr.get("PIN_Y", "0"))
@@ -643,8 +676,12 @@ def _parse_extracta(text: str) -> BoardModel:
                 ry = py - comp.y
                 dx = rx * ct - ry * st
                 dy = rx * st + ry * ct
+                # Canonical name was decided above; use it here so the
+                # Shape's pin list and `model.signals` share the same
+                # names. Index `i` indexes the same `pins_by_refdes`
+                # list both passes walked.
                 local_pins.append(
-                    (pr["PIN_NUMBER"].strip(), dx, dy),
+                    (canonical_pin_name[(refdes, i)], dx, dy),
                 )
         model.shapes[comp.shape] = Shape(name=comp.shape, pins=local_pins)
 
