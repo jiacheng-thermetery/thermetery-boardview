@@ -620,30 +620,14 @@ def _detect_variant(data: bytes) -> str:
 
 
 def _parse_compal(path: Path) -> BoardModel:
-    """Stub parser for the Compal/Lenovo TVW variant.
+    """Dispatch to the Compal/Lenovo decoder in ``tvw_compal``.
 
-    The Compal variant deviates from Gigabyte in several structural
-    places — chip enumeration uses a different anchor pattern, layer pad
-    records are 19-byte stride (not 38), and the master footprint pool
-    starts ~234 KB earlier in the file. See TVW_FORMAT.html and GitHub
-    issue #1 for the full format characterisation.
-
-    This stub returns an empty BoardModel with a single warning so the
-    viewer surfaces a clear "variant not yet supported" message rather
-    than silently producing wrong output. The full Compal decoder lands
-    in a follow-up commit.
+    Local import keeps the Compal module out of the import path for
+    Gigabyte-only callers, and means a broken tvw_compal.py can't crash
+    the Gigabyte path during module load.
     """
-    model = BoardModel()
-    # `warnings` is a free-form list checked by the viewer via getattr —
-    # it isn't part of BoardModel's slots, just an attached attribute.
-    model.warnings = [
-        f"{Path(path).name}: detected as Compal/Lenovo TVW variant "
-        f"(e.g. Lenovo Thinkpad NM-B501 motherboards). Full parser for "
-        f"this variant is in progress — currently returning an empty "
-        f"model. Tracking: GitHub issue #1. See TVW_FORMAT.html in this "
-        f"repo for the decoded format spec."
-    ]
-    return model
+    from tvw_compal import parse as parse_compal
+    return parse_compal(path)
 
 
 def parse(path: Path) -> BoardModel:
