@@ -1,0 +1,741 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TVW (Teboview) binary format — working spec</title>
+<style>
+  :root {
+    --bg: #fdfdfb;
+    --fg: #20242a;
+    --muted: #5a6470;
+    --rule: #d6d9de;
+    --accent: #1a4d8c;
+    --accent-bg: #e8f0fa;
+    --giga: #1a4d8c;       /* Gigabyte */
+    --giga-bg: #e8f0fa;
+    --compal: #117070;     /* Compal/Lenovo */
+    --compal-bg: #e2f0ef;
+    --code-bg: #f4f5f7;
+    --tag-ok: #2a6;
+    --tag-spec: #c80;
+    --tag-open: #b22;
+  }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    margin: 0;
+    padding: 0;
+  }
+  .page {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    max-width: 1300px;
+    margin: 0 auto;
+    gap: 32px;
+  }
+  @media (max-width: 900px) {
+    .page { grid-template-columns: 1fr; }
+    nav.toc { position: static !important; height: auto !important; }
+  }
+  nav.toc {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    padding: 24px 16px 24px 24px;
+    font-size: 13.5px;
+    line-height: 1.45;
+    border-right: 1px solid var(--rule);
+    background: var(--bg);
+  }
+  nav.toc h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    margin: 0 0 8px;
+    border: none;
+    padding: 0;
+  }
+  nav.toc ol { padding-left: 22px; margin: 0 0 16px; }
+  nav.toc li { margin: 2px 0; }
+  nav.toc a {
+    color: var(--fg);
+    text-decoration: none;
+  }
+  nav.toc a:hover { text-decoration: underline; color: var(--accent); }
+  main {
+    padding: 32px 28px 80px;
+    max-width: 880px;
+  }
+  h1 {
+    font-size: 30px;
+    margin: 0 0 6px;
+    letter-spacing: -0.01em;
+  }
+  .subtitle {
+    color: var(--muted);
+    margin: 0 0 36px;
+    font-size: 15px;
+  }
+  h2 {
+    font-size: 22px;
+    margin: 48px 0 14px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--rule);
+    letter-spacing: -0.005em;
+  }
+  h3 {
+    font-size: 17px;
+    margin: 28px 0 8px;
+  }
+  h4 {
+    font-size: 14px;
+    margin: 20px 0 4px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  p { margin: 8px 0 14px; }
+  code {
+    font-family: "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 13.5px;
+    background: var(--code-bg);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+  pre {
+    background: var(--code-bg);
+    padding: 14px 16px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-family: "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 12px 0;
+  }
+  pre code { background: none; padding: 0; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 12px 0;
+    font-size: 14px;
+  }
+  th, td {
+    text-align: left;
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  th {
+    background: var(--code-bg);
+    font-weight: 600;
+  }
+  table.layout td:first-child,
+  table.layout th:first-child { font-family: "SF Mono", Consolas, Menlo, monospace; font-size: 13px; white-space: nowrap; }
+  table.layout td:nth-child(2),
+  table.layout th:nth-child(2) { font-family: "SF Mono", Consolas, Menlo, monospace; font-size: 13px; white-space: nowrap; }
+  .tag {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 7px;
+    border-radius: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+    vertical-align: middle;
+    margin-left: 6px;
+  }
+  .tag-ok { background: #e2f3e7; color: var(--tag-ok); }
+  .tag-spec { background: #fbeed0; color: var(--tag-spec); }
+  .tag-open { background: #f7dcdc; color: var(--tag-open); }
+  .variant-giga {
+    background: var(--giga-bg);
+    border-left: 3px solid var(--giga);
+    padding: 10px 14px;
+    margin: 12px 0;
+    border-radius: 0 4px 4px 0;
+  }
+  .variant-compal {
+    background: var(--compal-bg);
+    border-left: 3px solid var(--compal);
+    padding: 10px 14px;
+    margin: 12px 0;
+    border-radius: 0 4px 4px 0;
+  }
+  .variant-giga h4, .variant-compal h4 {
+    margin-top: 4px;
+    color: inherit;
+  }
+  .callout {
+    border: 1px solid var(--rule);
+    background: #fff;
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin: 16px 0;
+  }
+  .callout strong { color: var(--accent); }
+  ul, ol { margin: 8px 0 14px; padding-left: 24px; }
+  li { margin: 3px 0; }
+  hr { border: 0; border-top: 1px solid var(--rule); margin: 28px 0; }
+  .meta {
+    font-size: 13px;
+    color: var(--muted);
+    margin-top: 8px;
+  }
+  .anchor-link {
+    color: var(--muted);
+    text-decoration: none;
+    margin-left: 6px;
+    font-size: 80%;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  h2:hover .anchor-link, h3:hover .anchor-link { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="page">
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#coords">Coordinate system</a></li>
+    <li><a href="#variants">Two variants</a></li>
+    <li><a href="#file-layout">File-level layout</a></li>
+    <li><a href="#chips">Chip enumeration</a>
+      <ol>
+        <li><a href="#chip-r3">R3 chip records</a></li>
+        <li><a href="#chip-cap">Cap-section</a></li>
+        <li><a href="#chip-r1">Region 1 layer table</a></li>
+      </ol>
+    </li>
+    <li><a href="#master">Master footprints</a>
+      <ol>
+        <li><a href="#master-pool">Pool location</a></li>
+        <li><a href="#master-sections">Section A–D</a></li>
+        <li><a href="#fp-id">fp_id → master_idx</a></li>
+      </ol>
+    </li>
+    <li><a href="#layer-pads">Layer pad records</a>
+      <ol>
+        <li><a href="#aperture">Aperture tables</a></li>
+      </ol>
+    </li>
+    <li><a href="#traces">Trace polylines</a></li>
+    <li><a href="#vias">Vias &amp; drills</a></li>
+    <li><a href="#nets">Net-name table</a></li>
+    <li><a href="#pin-transform">Pin transform</a></li>
+    <li><a href="#layer-flag">Layer flag</a></li>
+    <li><a href="#filter">Filter rules</a></li>
+    <li><a href="#detect">Variant detection</a></li>
+    <li><a href="#unknowns">Open / declared-unimportant</a></li>
+    <li><a href="#anchors">Ground-truth anchors</a></li>
+    <li><a href="#sources">Sources &amp; credit</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<h1>TVW (Teboview) binary format</h1>
+<p class="subtitle">Working spec covering both the Gigabyte variant (originally cracked from Z490 / X570 / B550) and the Compal/Lenovo variant (cracked from T480 NM-B501R10). Status badges mark each claim as <span class="tag tag-ok">verified</span>, <span class="tag tag-spec">speculative</span>, or <span class="tag tag-open">open</span>.</p>
+
+<h2 id="overview">1. Overview <a class="anchor-link" href="#overview">#</a></h2>
+
+<p>TVW is the binary boardview format produced by the Teboview viewer (originally a Gigabyte tool, later adopted by other OEMs). All known variants share a core file-level structure but disagree on details — chip-record layout, layer encoding, pad-record stride, and the location of auxiliary tables.</p>
+
+<p>This document covers two variants:</p>
+
+<div class="variant-giga"><h4>Gigabyte</h4>
+Verified on motherboard files (Z490 VISION G, X570 GAMING X, B550 AORUS PRO AC) and GPU files (GV-N780OC-3GD 10-layer, GV-R79XTGAMING 12-layer). Two layers TOP/BOTTOM on mobos; multi-layer on GPUs.
+</div>
+
+<div class="variant-compal"><h4>Compal/Lenovo</h4>
+Verified on the Lenovo Thinkpad T480 NM-B501R10 (10 copper layers). Sometimes called the "Compal variant" because Compal is Lenovo's contract manufacturer for the T-series. Structure deviates from Gigabyte in several places — chip records use a different anchor scheme, layer pads are 19-byte stride (not 38-byte), and the master footprint pool starts ~234 KB earlier than the Gigabyte convention would predict.
+</div>
+
+<p>Both variants are little-endian throughout.</p>
+
+<h2 id="coords">2. Coordinate system <a class="anchor-link" href="#coords">#</a></h2>
+
+<ul>
+  <li>All coordinates are signed 32-bit integers in <strong>file units</strong>.</li>
+  <li>1 file unit ≈ 0.32 µm (verified across Gigabyte and Compal/Lenovo; 50 file units ≈ 16 µm matches the empirical pad-matching tolerance).</li>
+  <li>1 mm ≈ 3,125 file units. 1 mil (0.0254 mm) ≈ 79 file units.</li>
+  <li>Typical motherboard span: ±1,000,000 file units (≈ 320 mm).</li>
+  <li><strong>Coords stored as <code>(Y, X)</code> on disk in Gigabyte trace data</strong>, <code>(X, Y)</code> in chip records and master records. Every reader must check which is which per section.</li>
+  <li>Origin <code>(0, 0)</code> is anchored on a mounting hole (<code>MH1</code> on Gigabyte boards). Real CAD trace endpoints never snap to origin — it's a reference anchor only.</li>
+</ul>
+
+<h2 id="variants">3. Two variants at a glance <a class="anchor-link" href="#variants">#</a></h2>
+
+<table>
+  <thead><tr><th>Aspect</th><th>Gigabyte</th><th>Compal/Lenovo</th></tr></thead>
+  <tbody>
+    <tr><td>Chip-record marker</td><td><code>0x01 + Pascal-dev + Pascal-fp</code> (the cap-section style, used for ALL chips)</td><td>Two coexisting sources: <code>00 00 00 00 + Pascal-refdes</code> (Region 3, primary) plus the cap-section for passives</td></tr>
+    <tr><td>Layer flag location</td><td>chip trailer byte +9 (<code>0x02 = TOP</code>, else BOTTOM)</td><td>Three-source chain: R1 supervised table → cap-section trailer +20 → master <code>_B</code> suffix</td></tr>
+    <tr><td>Layer pad stride</td><td>38-byte (TOP) + 54-byte (through-hole BOTTOM)</td><td>19-byte for all 10 copper layers; 38-byte only for GND-stitching drill table</td></tr>
+    <tr><td>Custom_NN markers</td><td>Section dividers (<code>Custom_35</code> = TOP trace, <code>Custom_17</code> = BOTTOM trace)</td><td>Labels for footprint shape catalogue entries; <strong>NOT</strong> region delimiters</td></tr>
+    <tr><td>Master pool location</td><td>tail of file (<code>+6,716,106</code> in Z490)</td><td><code>0xbd69e3..0xc3fe8b</code> in T480 — ~234 KB earlier than the Gigabyte convention</td></tr>
+    <tr><td>Pin-name table per chip</td><td>Embedded in cap-section trailer</td><td>Inline in chip R3 record (per-pin records with variable 17+L stride)</td></tr>
+    <tr><td>Number of copper layers</td><td>2 (mobos) or up to 12 (GPUs)</td><td>10 (TOP + IN1..IN4 + VCC + GND1..GND3 + BOTTOM)</td></tr>
+  </tbody>
+</table>
+
+<h2 id="file-layout">4. File-level layout <a class="anchor-link" href="#file-layout">#</a></h2>
+
+<h3>Gigabyte (Z490, 6.78 MB example)</h3>
+<table class="layout">
+  <thead><tr><th>Range</th><th>Size</th><th>Content</th></tr></thead>
+  <tbody>
+    <tr><td>0 – 8.5 K</td><td>8 KB</td><td>header / signature / fab metadata</td></tr>
+    <tr><td>8.5 K – 4.76 M</td><td>4.75 MB</td><td>TOP-layer trace data (Custom_35 region)</td></tr>
+    <tr><td>4.76 M – 5.99 M</td><td>1.23 MB</td><td>BOTTOM-layer trace data (Custom_17 region)</td></tr>
+    <tr><td>5.99 M – 6.05 M</td><td>50 KB</td><td>net name table</td></tr>
+    <tr><td>6.05 M – 6.53 M</td><td>480 KB</td><td>chip records (per-component metadata)</td></tr>
+    <tr><td>6.72 M+</td><td>tail</td><td>master footprint section</td></tr>
+  </tbody>
+</table>
+
+<h3>Compal/Lenovo (T480, 12.85 MB)</h3>
+<table class="layout">
+  <thead><tr><th>Range</th><th>Content</th></tr></thead>
+  <tbody>
+    <tr><td><code>0x000000 .. 0x019cd6</code></td><td>header / fab metadata / early aux records</td></tr>
+    <tr><td><code>0x01c09e .. 0x037176</code></td><td>TOP layer pad records (5,832 × 19-byte)</td></tr>
+    <tr><td><code>0x0985d9 .. 0x0a53bb</code></td><td>GND-stitching drill table (1,387 × 38-byte)</td></tr>
+    <tr><td><code>0x18f5c4 .. 0x1b1c78</code></td><td>IN1 layer pad records (7,420 × 19-byte)</td></tr>
+    <tr><td><code>0x21d66e .. 0x23fd22</code></td><td>IN2 layer pad records (7,420)</td></tr>
+    <tr><td><code>0x2ef6f0 .. 0x311da4</code></td><td>IN3 (7,420)</td></tr>
+    <tr><td><code>0x3685ce .. 0x38ac82</code></td><td>IN4 (7,420)</td></tr>
+    <tr><td><code>0x412b70 .. 0x435237</code></td><td>VCC plane (7,421)</td></tr>
+    <tr><td><code>0x5691a4 .. 0x58b86b</code></td><td>GND3 plane (7,421)</td></tr>
+    <tr><td><code>0x68e73c .. 0x6b0e03</code></td><td>GND2 plane (7,421)</td></tr>
+    <tr><td><code>0x7b39b4 .. 0x7d607b</code></td><td>GND1 plane (7,421)</td></tr>
+    <tr><td><code>0x0695f5 .. 0x100537</code></td><td>L1 (TOP) trace segments (19,503)</td></tr>
+    <tr><td><code>0x1b1c83 .. 0x1ecd83</code></td><td>L2 (IN1) trace segments (10,080)</td></tr>
+    <tr><td><code>0x23fd2d .. 0x25ac6d</code></td><td>L3 (IN2) trace segments (4,600)</td></tr>
+    <tr><td><code>0x311daf .. 0x33a12f</code></td><td>L4 (IN3) trace segments (6,864)</td></tr>
+    <tr><td><code>0x38ac8d .. 0x3deddd</code></td><td>L5 (IN4) trace segments (14,350)</td></tr>
+    <tr><td><code>0x914012 .. 0x9ba8da</code></td><td>L6 (BOTTOM) trace segments (23,554)</td></tr>
+    <tr><td><code>0x9fb1e9 .. 0xa18f6f</code></td><td>BOTTOM layer pad records (6,434)</td></tr>
+    <tr><td><code>0xa00000 .. 0xc00000</code> (approx)</td><td>Region 3 chip table (~1,734 chip records, inline pin lists)</td></tr>
+    <tr><td><code>0xb384fe</code></td><td>net-name table (count = 2,774)</td></tr>
+    <tr><td><code>0xbd69e3 .. 0xc3fe8b</code></td><td>Master footprint pool (240 masters)</td></tr>
+  </tbody>
+</table>
+
+<p>Plane layers (VCC, GND1..GND3) carry pads only — no traces. Signal layers (TOP, IN1..IN4, BOTTOM) carry both. <strong>10 copper layers, 6 trace-bearing.</strong></p>
+
+<h2 id="chips">5. Chip enumeration <a class="anchor-link" href="#chips">#</a></h2>
+
+<p>In the Compal/Lenovo variant, chips are enumerated from <strong>three sources</strong>, with union semantics:</p>
+<ol>
+  <li><a href="#chip-r3">Region 3 records</a> — primary, ~1,734 chips with full footprint and pin-list data</li>
+  <li><a href="#chip-cap">Cap-section</a> — adds ~367 passives (mostly C and P refdes) not in Region 3</li>
+  <li><a href="#chip-r1">Region 1 layer-flag table</a> — adds ~7 R1-only chips (mostly connectors)</li>
+</ol>
+<p><strong>Total: 2,214 unique top-level chips on T480.</strong> Filtering excludes pin sub-records and test-point entries (combined ~2,611 spurious matches).</p>
+
+<h3 id="chip-r3">5.1 Region 3 chip records <a class="anchor-link" href="#chip-r3">#</a></h3>
+<p><span class="tag tag-ok">verified</span> Anchored by the byte sequence <code>00 00 00 00</code> followed by a Pascal-prefixed refdes. After the Pascal refdes:</p>
+
+<table class="layout">
+  <thead><tr><th>Offset</th><th>Type</th><th>Field</th></tr></thead>
+  <tbody>
+    <tr><td>+0..+3</td><td>int32 LE</td><td>chip world Y (silkscreen anchor)</td></tr>
+    <tr><td>+4..+7</td><td>int32 LE</td><td>chip world X</td></tr>
+    <tr><td>+8..+11</td><td>int32 LE</td><td><code>f0</code> — first int of bbox-anchor field</td></tr>
+    <tr><td>+12..+15</td><td>int32 LE</td><td><code>f1</code></td></tr>
+    <tr><td>+16..+19</td><td>int32 LE</td><td><code>f2</code> — canonical pin anchor Y</td></tr>
+    <tr><td>+20..+23</td><td>int32 LE</td><td><code>f3</code> — canonical pin anchor X</td></tr>
+    <tr><td>+24..+27</td><td>int32 LE</td><td>rotation (0 / 90 / 180 / 270)</td></tr>
+    <tr><td>+28..+31</td><td>int32 LE</td><td><code>fp_id</code> — footprint ID</td></tr>
+    <tr><td>+32..+43</td><td>12 bytes</td><td>zeros (all 0x00)</td></tr>
+    <tr><td>+44..+47</td><td>4 bytes</td><td><strong>magic flag <code>01 01 2a 00</code></strong> (chip-record signature)</td></tr>
+    <tr><td>+48</td><td>byte</td><td>0x00 alignment</td></tr>
+    <tr><td>+49..</td><td>Pascal</td><td>footprint name (e.g. <code>SKYLAKE-U_BGA_1356P-T</code>, length 21)</td></tr>
+    <tr><td>after fp</td><td>Pascal</td><td>part code (e.g. <code>SA00008JC00</code>, length 11)</td></tr>
+    <tr><td>+4 after pc</td><td>uint32</td><td>pin_count (= 1356 for U58)</td></tr>
+    <tr><td>+8 after pc</td><td>uint32</td><td>"mystery flag" (varies 0/2/11 per placement — likely SMT vs through-via stack)</td></tr>
+    <tr><td>+12 after pc</td><td>uint32</td><td>zero reserved</td></tr>
+    <tr><td>+16 after pc</td><td>—</td><td>first pin record begins</td></tr>
+  </tbody>
+</table>
+
+<h4>Per-pin record (inline)</h4>
+<p>Variable stride <code>17 + L</code> bytes, where <code>L</code> is the Pascal length of the pin name:</p>
+<table class="layout">
+  <thead><tr><th>Offset</th><th>Type</th><th>Field</th></tr></thead>
+  <tbody>
+    <tr><td>+0..+3</td><td>uint32</td><td><code>ptr</code> — steps by 8 across pins (U58 first_ptr = 12344)</td></tr>
+    <tr><td>+4..+7</td><td>4 zeros</td><td></td></tr>
+    <tr><td>+8..+11</td><td>uint32</td><td>pin_idx (integer part of the BGA grid name; for U58 it's the number from "A3", "A4", ...)</td></tr>
+    <tr><td>+12</td><td>uint8</td><td>Pascal length L</td></tr>
+    <tr><td>+13..+12+L</td><td>L bytes</td><td>pin name (e.g. "A3", "K1", "AA10")</td></tr>
+    <tr><td>+13+L..+16+L</td><td>4 zeros</td><td></td></tr>
+  </tbody>
+</table>
+
+<p><strong>Pin → master link:</strong> <code>master_pin_idx = (ptr - first_ptr) // 8</code>. The master record's Section C (per-pin local coords) at this index gives the pin's local <code>(A, B)</code> position.</p>
+
+<h3 id="chip-cap">5.2 Cap-section records <a class="anchor-link" href="#chip-cap">#</a></h3>
+<p><span class="tag tag-ok">verified</span> Uses the Gigabyte-style <code>0x01 + Pascal-dev_name + Pascal-footprint</code> chip-header pattern. The existing <code>_find_chip_headers()</code> in <code>tvw_parser.py</code> detects these. On T480 they cover ~884 chips, mostly small passives (C, P refdes).</p>
+
+<p>The trailer immediately after the chip header (at <code>c['after_off']</code>) starts with an <strong>11-byte Pascal "part code" string</strong> like <code>SE000010J0T</code>, <code>SGA00007T00</code>, <code>SH00001AB00</code> (length prefix <code>0x0b</code>). On Gigabyte boards this Pascal isn't present and the layer byte sits at <code>after_off + 9</code>; on Compal/Lenovo it's at <code>after_off + 20</code> (20 bytes past the SE-string start).</p>
+
+<h4>Compal/Lenovo cap-section layer byte</h4>
+<p>At <code>c['after_off'] + 20</code>: <strong><code>0x02</code> = TOP, <code>0x0b</code> = BOTTOM</strong>. Verified on 20 chips that overlap with Region 1 supervised data (all 20 agree).</p>
+
+<h3 id="chip-r1">5.3 Region 1 layer-flag table <a class="anchor-link" href="#chip-r1">#</a></h3>
+<p><span class="tag tag-ok">verified</span> Compal/Lenovo only. Detected by signature: Pascal-prefixed refdes where the byte sequence <code>b8 0b 00 00 2c 01 00 00</code> (= constants 0xbb800 and 0x12c00) appears at after-Pascal +12..+19. Layer flag at after-Pascal +24..+27 (int32):</p>
+<ul>
+  <li><code>0</code> = TOP</li>
+  <li><code>1</code> = BOTTOM</li>
+</ul>
+<p>Covers 296 unique top-level chips (after filtering pin sub-records). Used as authoritative ground truth — never disagrees with itself across multi-anchor chips. Subset of Region 3.</p>
+
+<h2 id="master">6. Master footprint records <a class="anchor-link" href="#master">#</a></h2>
+
+<h3 id="master-pool">6.1 Pool location <a class="anchor-link" href="#master-pool">#</a></h3>
+<p><span class="tag tag-ok">verified</span> Compal/Lenovo: master pool at <strong><code>0xbd69e3 .. 0xc3fe8b</code></strong>, 240 master records. Each starts with the signature <code>00 00 00 00 00 00 00 00 01</code> (8 zeros + 0x01) followed by a Pascal-prefixed footprint name.</p>
+
+<p><strong>Note:</strong> earlier investigation missed the first 34 masters in <code>0xbd69e3..0xbf09c6</code>, leading to wrong fp_id offsets. The correct pool extends from <code>0xbd69e3</code>, not <code>0xbf0000</code>.</p>
+
+<h3 id="master-sections">6.2 Section A–D layout <a class="anchor-link" href="#master-sections">#</a></h3>
+
+<p>Each master record's data section (after the 9-byte signature + Pascal name) decomposes into:</p>
+
+<table class="layout">
+  <thead><tr><th>Section</th><th>Size</th><th>Content</th></tr></thead>
+  <tbody>
+    <tr><td>preamble</td><td>173 bytes</td><td>constant header pattern</td></tr>
+    <tr><td>A — outline polyline</td><td>N × 24 bytes</td><td>chip-courtyard outline</td></tr>
+    <tr><td>B — pad-shape table</td><td>variable</td><td>per-master pad-shape definitions referenced by the per-pin enum</td></tr>
+    <tr><td>C — per-pin local coords</td><td>P × 19 bytes</td><td>one record per pin (P = footprint pin count)</td></tr>
+    <tr><td>D — bounding trailer polyline</td><td>~65 + K×8 bytes</td><td>chip-body outline / heat slug / silk</td></tr>
+  </tbody>
+</table>
+
+<h4>Section A — outline polyline (24-byte records)</h4>
+<pre><code>+0..+3   sentinel  0xff 0xff 0xff 0xff
++4..+7   uint32    type = 10 (constant for outline)
++8..+11  int32     X1
++12..+15 int32     Y1
++16..+19 int32     X2
++20..+23 int32     Y2</code></pre>
+<p>Edges chain: <code>corner2_N == corner1_N+1</code>. Closed: <code>last.P2 == first.P1</code>.</p>
+
+<h4>Section B — pad-shape table</h4>
+<p>Structured as <code>M × subblock + 12-byte footer</code>. Each subblock = 84-byte fixed preamble + variable body. Body:</p>
+<pre><code>+0..+3   uint32  leader = 10 + N_shapes (next available enum_id)
++4..     N × 24-byte shape records
++...     8-byte body trailer = 01 00 00 00 00 00 00 00</code></pre>
+
+<p><strong>24-byte shape record:</strong></p>
+<table class="layout">
+  <thead><tr><th>Offset</th><th>Type</th><th>Field</th></tr></thead>
+  <tbody>
+    <tr><td>+0..+3</td><td>uint32</td><td>layer (always 1)</td></tr>
+    <tr><td>+4..+7</td><td>int32</td><td>dim_X (file units, ≈ 0.32 µm)</td></tr>
+    <tr><td>+8..+11</td><td>int32</td><td>dim_Y</td></tr>
+    <tr><td>+12..+15</td><td>uint32</td><td>shape_code (0 = round, 1 = rectangle, 3 = oblong, 5 = custom polygon)</td></tr>
+    <tr><td>+16..+19</td><td>uint32</td><td>reserved (= 0)</td></tr>
+    <tr><td>+20..+23</td><td>int32</td><td>extra (rotation / short-axis radius; 0 for round and rect)</td></tr>
+  </tbody>
+</table>
+
+<p><strong>Footer (12 bytes):</strong> <code>01 00 00 00 [total_pin_count u32] 02 00 00 00</code>. The pin count must equal Section C's record count.</p>
+
+<h4>Section C — per-pin local coords (19-byte records)</h4>
+<table class="layout">
+  <thead><tr><th>Offset</th><th>Type</th><th>Field</th></tr></thead>
+  <tbody>
+    <tr><td>+0..+3</td><td>sentinel</td><td><code>0xff 0xff 0xff 0xff</code></td></tr>
+    <tr><td>+4..+7</td><td>uint32</td><td>pad_shape_enum (indexes Section B; values 10..14 for SKYLAKE-U)</td></tr>
+    <tr><td>+8..+11</td><td>int32</td><td>A (local X, footprint-local frame)</td></tr>
+    <tr><td>+12..+15</td><td>int32</td><td>B (local Y, footprint-local frame)</td></tr>
+    <tr><td>+16..+18</td><td>3 bytes</td><td>zero padding</td></tr>
+  </tbody>
+</table>
+
+<h4>Section D — bounding trailer</h4>
+<p>65-byte preamble + <code>uint32 K</code> (vertex count) + <code>K × 8 bytes</code> (each pair = int32 Y, int32 X). <code>K = 4</code> for chip packages with rectangular bbox (QFN/QFP); <code>K = A_edge_count</code> for fully-curved outlines (BGAs, fiducials).</p>
+
+<h3 id="fp-id">6.3 fp_id → master_idx <a class="anchor-link" href="#fp-id">#</a></h3>
+<p><span class="tag tag-ok">verified</span> <strong>Rule: <code>master_idx = fp_id - 1</code></strong>. Clean across all 1,452 resolvable chip records. No skips, no orphans.</p>
+
+<p>The chip's stored footprint name is always the BASE name (no <code>_B</code> suffix). The <code>fp_id</code> selects the actual master variant — base or <code>_B</code>. So a chip on BOTTOM that uses a paired footprint will record <code>UM6K33N_UMT6</code> as its footprint string but its <code>fp_id</code> will point to the master record for <code>UM6K33N_UMT6_B</code>.</p>
+
+<p>1,025 chips map to the base-name master (TOP variant); 427 map to the <code>_B</code> (BOTTOM) variant. <strong>65 masters are dead</strong> (never referenced) — library templates retained on disk but unused on this board.</p>
+
+<h2 id="layer-pads">7. Layer pad records <a class="anchor-link" href="#layer-pads">#</a></h2>
+
+<p><span class="tag tag-ok">verified</span> Compal/Lenovo uses <strong>19-byte stride layer pad records</strong> for all 10 copper layers. Format:</p>
+
+<table class="layout">
+  <thead><tr><th>Offset</th><th>Type</th><th>Field</th></tr></thead>
+  <tbody>
+    <tr><td>+0..+2</td><td>3 zero bytes</td><td>prefix (100% pure across 71,630 records)</td></tr>
+    <tr><td>+3..+6</td><td>uint32</td><td>net_id (&lt; 4000, indexes net-name table)</td></tr>
+    <tr><td>+7..+10</td><td>uint32</td><td>pad_type (indexes per-region aperture table)</td></tr>
+    <tr><td>+11..+14</td><td>int32</td><td>Y world</td></tr>
+    <tr><td>+15..+18</td><td>int32</td><td>X world</td></tr>
+  </tbody>
+</table>
+
+<p>71,630 records total across 10 layer regions. 18,697 unique <code>(Y, X)</code> positions. Pads appearing in multiple layer regions = through-vias.</p>
+
+<div class="callout">
+<strong>Common pitfall:</strong> The Gigabyte 38-byte pad-record scanner, applied naïvely to Compal/Lenovo, reads two adjacent 19-byte records as one 38-byte record. The "first half" looks like garbage (it's another pad's data), and the count comes out at exactly half. Confirm format by checking the <code>00 00 00</code> 3-byte prefix.
+</div>
+
+<h3 id="aperture">7.1 Per-region aperture tables <a class="anchor-link" href="#aperture">#</a></h3>
+
+<p><span class="tag tag-ok">verified</span> Each layer's pad-data run is preceded by an aperture-table header at a known offset:</p>
+
+<table>
+  <thead><tr><th>Layer</th><th>Phys# entries</th><th>Hdr#</th><th>Table @</th></tr></thead>
+  <tbody>
+    <tr><td>TOP</td><td>(mix)</td><td>249</td><td><code>0x3a0e8</code></td></tr>
+    <tr><td>IN1</td><td>60</td><td>70</td><td><code>0x18f013</code></td></tr>
+    <tr><td>IN2</td><td>53</td><td>63</td><td><code>0x21d165</code></td></tr>
+    <tr><td>IN3</td><td>57</td><td>67</td><td><code>0x2ef187</code></td></tr>
+    <tr><td>IN4</td><td>60</td><td>70</td><td><code>0x36801d</code></td></tr>
+    <tr><td>VCC</td><td>44</td><td>54</td><td><code>0x41273f</code></td></tr>
+    <tr><td>GND3</td><td>44</td><td>54</td><td><code>0x568d73</code></td></tr>
+    <tr><td>GND2</td><td>44</td><td>54</td><td><code>0x68e30b</code></td></tr>
+    <tr><td>GND1</td><td>44</td><td>54</td><td><code>0x7b3583</code></td></tr>
+    <tr><td>BOTTOM</td><td>(mix)</td><td>274</td><td><code>0x8d8bc7</code></td></tr>
+  </tbody>
+</table>
+
+<h4>Aperture table header</h4>
+<pre><code>uint32×3   magic = (3, 2, 1)
+Pascal     layer_name        (e.g. "IN1")
+Pascal     layer_name        (DUPLICATE)
+Pascal     source_path       (e.g. "D:\DFT\...\NMB501R10-1113.cad")
+uint32     magic_d           (3 for inner layers, 1 for TOP/BOTTOM)
+int32      board_ext_X
+int32      board_ext_Y
+uint32     ap_count_header   (= max_pad_type + 1)
+&lt;Hdr# - 10&gt; × 24-byte aperture entry
+17-byte footer: 01 00 00 00 | 00 00 00 00 | 01 00 00 00 | &lt;pad_count u32&gt; | layer_byte=2</code></pre>
+
+<h4>24-byte aperture entry</h4>
+<table class="layout">
+  <thead><tr><th>Offset</th><th>Type</th><th>Field</th></tr></thead>
+  <tbody>
+    <tr><td>+0..+3</td><td>uint32</td><td>count (always 1)</td></tr>
+    <tr><td>+4..+7</td><td>uint32</td><td>dim_X</td></tr>
+    <tr><td>+8..+11</td><td>uint32</td><td>dim_Y</td></tr>
+    <tr><td>+12..+15</td><td>uint32</td><td>shape_type (0 = round, 1 = rect, 3 = oblong, 5 = custom polygon)</td></tr>
+    <tr><td>+16..+19</td><td>uint32</td><td>reserved (0)</td></tr>
+    <tr><td>+20..+23</td><td>uint32</td><td>dim_Y_dup (= dim_Y for oblong, 0 otherwise)</td></tr>
+  </tbody>
+</table>
+
+<p><strong>Important:</strong> The last 10 pad_type IDs per region are NOT in the layer's aperture table — they resolve through the chip's master pad-shape table (Section B). This is why dominant pad_type values like 68 (IN1) or 51 (VCC) can't be found in the layer aperture alone.</p>
+
+<h2 id="traces">8. Trace polylines <a class="anchor-link" href="#traces">#</a></h2>
+
+<p><span class="tag tag-ok">verified</span> Routed copper traces use a single common format on both Gigabyte and Compal/Lenovo:</p>
+
+<table class="layout">
+  <thead><tr><th>Offset</th><th>Type</th><th>Field</th></tr></thead>
+  <tbody>
+    <tr><td>+0..+3</td><td>uint32</td><td>net_id (0 = untagged, &lt; 4000 = real net)</td></tr>
+    <tr><td>+4..+7</td><td>uint32</td><td>K (aperture/width index, 1..50)</td></tr>
+    <tr><td>+8..+11</td><td>int32</td><td>Y1</td></tr>
+    <tr><td>+12..+15</td><td>int32</td><td>X1</td></tr>
+    <tr><td>+16..+19</td><td>int32</td><td>Y2</td></tr>
+    <tr><td>+20..+23</td><td>int32</td><td>X2</td></tr>
+  </tbody>
+</table>
+
+<p>Each record is one segment. Polylines reconstruct by chaining segments with matching <code>net_id</code> + matching endpoints.</p>
+
+<p>T480 has <strong>78,951 trace segments across 6 signal layers</strong> (TOP, IN1..IN4, BOTTOM). The 4 plane layers (VCC, GND1..3) carry pads only.</p>
+
+<h2 id="vias">9. Vias and drills <a class="anchor-link" href="#vias">#</a></h2>
+
+<p><span class="tag tag-ok">verified</span> Compal/Lenovo has <strong>no dedicated via record type</strong>. Vias are inferred from layer-pad XY coincidence: a pad position appearing in ≥ 2 layer regions = a via at that XY connecting those layers.</p>
+
+<p>Pad coincidence patterns:</p>
+<ul>
+  <li><strong>11,153 unique positions</strong> in only one region (pure SMD pad)</li>
+  <li><strong>6,714 unique positions</strong> in all 8 inner copper layers (buried/blind inner-only via stack)</li>
+  <li><strong>164 unique positions</strong> in all 10 layers (true through-hole — SO-DIMM, ATX-like connectors, mounting holes)</li>
+  <li>469 in 8 inner + TOP only (top-side blind via)</li>
+  <li>73 in 8 inner + BOTTOM only (bottom-side blind via)</li>
+</ul>
+
+<h3>GND-stitching drill table (38-byte stride)</h3>
+<p>The exception. At <code>0x985d9 .. 0xa53bb</code>, 1,387 records:</p>
+<pre><code>+0..+1    2-byte prefix     (00 00 first record, 00 02 subsequent — likely layer mask)
++2..+5    uint32  net_id    (always 45 = GND for this board)
++6..+9    uint32  pad_type  (drill-size index; only 3 values: 27, 15, 162)
++10..+13  int32   Y world
++14..+17  int32   X world
++18..+21  4 bytes 00 01 00 00 (flag/sentinel)
++22..+25  uint32  drill_flag = 1
++26..+29  uint32  reserved = 0
++30..+33  uint32  drill_dia_Y (0x32000 = 204,800 fu ≈ 0.3 mm)
++34..+37  uint32  drill_dia_X</code></pre>
+
+<p>These are GND stitching/fence vias only. Signal through-holes (e.g. SODIMM connector pins) are represented redundantly as one 19-byte pad record on each of the 10 layers.</p>
+
+<h2 id="nets">10. Net-name table <a class="anchor-link" href="#nets">#</a></h2>
+
+<p><span class="tag tag-ok">verified</span> Compal/Lenovo location: <code>0xb384fe</code>.</p>
+<ul>
+  <li>Header (8 bytes): <code>d6 0a 00 00 d6 0a 00 00</code> = uint32 count (= 2,774) repeated twice.</li>
+  <li>Strings at <code>0xb38506</code>: sequential Pascal-prefixed net names. <code>net_id</code> indexes this table (1-based or 0-based — verify).</li>
+</ul>
+
+<p>Verified net_ids from anchors: PECI = 1330, TBT_LSRX = 1006, TBT_LSTX = 1005, GND = 45, VCCCPUCORE = 968, CPU_PWRGD = 561.</p>
+
+<h2 id="pin-transform">11. Canonical pin-position transform <a class="anchor-link" href="#pin-transform">#</a></h2>
+
+<p><span class="tag tag-ok">verified</span> The transform is <strong>heuristic-free</strong> — no 16-way rotation search. Residuals are exactly 0 on every pin whose pad exists in the layer-pad records.</p>
+
+<pre><code>def chip_pin_to_world(chip, A_local, B_local, layer):
+    """
+    chip['f2'], chip['f3']: the (Y_min, X_min) corner of the 16-byte
+                            bbox field at the chip R3 record's
+                            after-Pascal +8..+23.
+    (A_local, B_local):      the two int32s from a 19-byte master
+                            Section C record.
+    """
+    rot = chip['rot']
+    if   rot ==   0: dy, dx = -A_local, -B_local
+    elif rot ==  90: dy, dx = -B_local,  A_local
+    elif rot == 180: dy, dx =  A_local,  B_local
+    elif rot == 270: dy, dx =  B_local, -A_local
+    if layer == 'BOTTOM':
+        dx = -dx        # BOTTOM-side chips mirror world-X delta
+    return (chip['f2'] + dy, chip['f3'] + dx)</code></pre>
+
+<p><strong>Verification: 216 chips across all 4 rotations × both layers × diverse component types (BGA, QFN, MOSFET, connector, diode) — every pin whose pad exists matches with 0 residual.</strong></p>
+
+<div class="callout">
+<strong>About the 16-byte bbox field:</strong> the field at chip R3 +8..+23 contains 4 int32s <code>(f0, f1, f2, f3)</code>. The semantics differ wildly across component types — for BGAs it's a constant 700×700 box; for QFN/MOSFET it approximates the chip body; for connectors it's a long thin rectangle. The values <em>look</em> inconsistent because they probably encode different things per chip-type, but <code>(f2, f3)</code> consistently works as the canonical pin anchor. Treat <code>(f0, f1)</code> as advisory only.
+</div>
+
+<h2 id="layer-flag">12. Layer flag — three-source chain <a class="anchor-link" href="#layer-flag">#</a></h2>
+
+<p><span class="tag tag-ok">verified</span> No single byte inside the chip R3 record encodes layer (best single-bit predictor across 290+ supervised chips reaches only 81.9% accuracy vs 76.4% baseline). Layer must come from:</p>
+
+<ol>
+  <li><strong>Region 1 supervised flag</strong> (int32 at after-Pascal +24..+27): 0 = TOP, 1 = BOTTOM. Covers 296 chips.</li>
+  <li><strong>Cap-section trailer byte</strong> at <code>c['after_off'] + 20</code>: 0x02 = TOP, 0x0b = BOTTOM. Covers 884 chips.</li>
+  <li><strong>Master <code>_B</code> suffix</strong>: the chip's fp_id resolves to a master record; if that master's name ends in <code>_B</code> the chip is BOTTOM, else TOP. Covers chips with paired footprints (~427 chips).</li>
+</ol>
+
+<p>For chips covered by multiple sources, all sources agree. Coverage union: ~2,200+ chips (essentially all real chips on T480). Chips covered by NONE of the three (e.g., fiducials, test points) default to TOP — acceptable since they have no electrical significance.</p>
+
+<h2 id="filter">13. Filter rules <a class="anchor-link" href="#filter">#</a></h2>
+
+<p><span class="tag tag-ok">verified</span> Two filter rules essential to avoid spurious matches:</p>
+
+<h4>Chip-record flag filter</h4>
+<p>Valid chip records have the magic flag <code>01 01 2a 00</code> at chip-record +48 (i.e. after-Pascal +44). A second record class with flag <code>01 04 30 2e</code> appears in the file with nonsense pin counts (e.g. 16,777,216) — these are NOT real chips and must be filtered out. Reject any chip record whose flag doesn't match exactly.</p>
+
+<h4>Pin sub-record filter</h4>
+<p>The R3 chip scanner picks up pin sub-records of larger chips as if they were standalone chips. Filter by refdes prefix:</p>
+<ul>
+  <li>Single-letter chip prefixes: U, R, C, D, Q, L, T, K, J, P, F, Y, B, S, A — real chips</li>
+  <li>Compound chip prefixes (connectors): JDDR, JCAM, JCP, JDOCK, JFAN, JFPR, JHDD, JHDMI, JUSB, JNFC, JSD, JWWAN, JPWR, JHP, JKBL, JLAN, JSPK, JLCD, MH, BAT, SW — real chips</li>
+  <li>Pin-like compound prefixes: PQ, PD, PL, PU, PR, PJ, PF, PC, PA, PB, PM, FL, FLJ, H — pin sub-records, filter out</li>
+</ul>
+
+<h4>Test-point fp_id filter</h4>
+<p>fp_ids 235..240 correspond to <code>OUTLINE_TB_TP1..TP6</code> — test-point list entries with no chip body, just outline placeholders. ~1,621 such records exist; they have no electrical meaning and should be filtered.</p>
+
+<h2 id="detect">14. Variant detection <a class="anchor-link" href="#detect">#</a></h2>
+
+<p>To select the right parser path at runtime, detect which variant the file is. Several discriminators are available:</p>
+
+<h4>Compal/Lenovo signatures</h4>
+<ul>
+  <li>Pascal-prefixed <code>SE...T</code>, <code>SGA...T</code>, or <code>SH...T</code> 11-char strings present in cap-section trailers. Look for the byte sequence <code>0x0b 'S' 'E' / 'G' / 'H'</code> following the chip-header marker.</li>
+  <li>The chip-record magic flag <code>01 01 2a 00</code> appears at chip R3 +44..+47.</li>
+  <li>Region 1 layer-flag records: scan for the byte sequence <code>b8 0b 00 00 2c 01 00 00</code> at any after-Pascal +12..+19 location. If &gt; 100 such records exist, it's a Compal/Lenovo variant.</li>
+  <li>Master pool start: walk back from end of file looking for <code>00 00 00 00 00 00 00 00 01 [Pascal name]</code>. If first master is at <code>~0xbd6000</code> rather than near the file end (Gigabyte convention is &gt; 80% through file), it's Compal/Lenovo.</li>
+</ul>
+
+<h4>Gigabyte signatures</h4>
+<ul>
+  <li>The <code>Custom_35</code> and <code>Custom_17</code> Pascal markers appear with payload-size gaps &gt; 1 MB (matching the dedicated TOP/BOTTOM trace regions).</li>
+  <li>No Region 1 layer-flag records found.</li>
+  <li>Cap-section chip trailer byte +9 is bimodal 0x02/non-0x02 (Gigabyte layer flag).</li>
+  <li>Master pool sits at &gt; 80% through file.</li>
+</ul>
+
+<p><strong>Recommended detection:</strong> count Region 1 records (cheap scan for the <code>b8 0b 00 00 2c 01 00 00</code> sequence). &gt; 100 → Compal/Lenovo. &lt; 5 → Gigabyte. Anything in between → log warning and fall through.</p>
+
+<h2 id="unknowns">15. Open and declared-unimportant <a class="anchor-link" href="#unknowns">#</a></h2>
+
+<h4>Open</h4>
+<ul>
+  <li><span class="tag tag-spec">spec</span> The chip-record "mystery flag" at chip after-pin-count +8 (varies 0/2/11 per placement). Hypothesised SMT vs through-via stack indicator. Not blocking for parser.</li>
+  <li><span class="tag tag-spec">spec</span> The 84-byte preamble pattern inside master Section B subblocks contains constants like <code>01 03 00 00</code> / <code>00 02 00 00</code> / <code>00 01 00 00</code> — speculated as RGB color values, unverified.</li>
+  <li><span class="tag tag-open">open</span> Per-chip silkscreen marker glyphs at each pin (the 20-byte line primitives in <code>0x440..0x6c00</code>) — purely cosmetic, low priority.</li>
+</ul>
+
+<h4>Investigated, then declared unimportant</h4>
+<ul>
+  <li>The 65 dead masters in the pool — library templates never referenced by any chip. Skip cleanly.</li>
+  <li>Custom_NN catalogue markers throughout the file — label footprint shape catalogue entries, not data delimiters. Use only when needed.</li>
+  <li>The "21-byte stride aux table" and "19-byte U-index table" earlier mistaken for missing-chip sources — they're the pin lists of U208 and U58, respectively. Already covered by R3.</li>
+</ul>
+
+<h2 id="anchors">16. Ground-truth anchors <a class="anchor-link" href="#anchors">#</a></h2>
+
+<p>Used throughout this spec for verification.</p>
+
+<h4>U58 — Intel Skylake-U CPU</h4>
+<ul>
+  <li>Chip R3 record at <code>0xb58ad6</code></li>
+  <li>World position: (Y = -450930, X = -196087)</li>
+  <li>Rotation: 0°</li>
+  <li>fp_id: 224 → master_idx 223 → <code>SKYLAKE-U_BGA_1356P-T</code></li>
+  <li>Master record at <code>0xc356ec</code>, 1,356 nominal pins</li>
+  <li>Layer: BOTTOM</li>
+  <li>Pin → net ground truth from BoardViewer.exe: pin 5 = N29947094, pin 13 = USB3P1_TXP_AOU, pin 18 = VCCST_CPU, pin 30 = VCCCPUCORE, pin 54 = PECI, pin 73 = GND</li>
+</ul>
+
+<h4>U186 — Intel JHL6240 Thunderbolt controller</h4>
+<ul>
+  <li>World position: (Y = -730926, X = 67538)</li>
+  <li>Rotation: 270°</li>
+  <li>fp_id: 61 → master_idx 60 → <code>JHL6240_BGA_337P</code></li>
+  <li>Layer: TOP</li>
+  <li>Pin → net ground truth: pin 1 = GND, pin 2 = VCC3_SUS, pin 4 = TBT_LSRX, pin 5 = TBT_LSTX, pin 49 = TBT_EE_DI, pin 50 = TBT_EE_CLK</li>
+</ul>
+
+<h4>JDDR1 — DDR4 socket</h4>
+<ul>
+  <li>Layer: BOTTOM</li>
+  <li>Through-hole connector — pads appear in all 10 copper layer regions</li>
+</ul>
+
+<h2 id="sources">17. Sources and credit <a class="anchor-link" href="#sources">#</a></h2>
+
+<p>This spec consolidates findings from a series of investigations:</p>
+
+<ul>
+  <li><strong>Gigabyte variant</strong> — earlier RE work cracked from Z490 VISION G, X570 GAMING X, B550 AORUS PRO AC, GV-N780OC-3GD (10-layer GPU). Starting point: <a href="https://github.com/inflex/teboviewformat">inflex/teboviewformat</a>; final decode is independent. Covered in the project's <code>TVW_FORMAT.md</code>.</li>
+  <li><strong>Compal/Lenovo variant</strong> — cracked May 2026 from Lenovo Thinkpad T480 NM-B501R10 (MD5 <code>6983e8afd4af43829ec210c1eef0136f</code>), prompted by GitHub issue #1 (reporter: fl42v). Ground-truth pin-net mapping verified against BoardViewer.exe screenshots supplied by the project owner.</li>
+</ul>
+
+<p class="meta">This file is auto-generated documentation; cross-check against the canonical <code>TVW_FORMAT.md</code> spec and the parser source code (<code>tvw_parser.py</code>) before relying on details for downstream tooling.</p>
+
+</main>
+</div>
+</body>
+</html>

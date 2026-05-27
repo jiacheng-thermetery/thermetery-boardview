@@ -585,10 +585,86 @@ def _build_signals(model: BoardModel, buf: bytes,
 
 
 # --------------------------------------------------------------------------
-# Public entry point
+# Public entry point — variant dispatch
 # --------------------------------------------------------------------------
 
+# Compal/Lenovo (e.g. Thinkpad NM-B501) TVW files carry a "Region 1"
+# layer-flag table where each chip has the constants 0xbb800 / 0x12c00
+# packed at after-Pascal +12..+19. The 8-byte signature `b8 0b 00 00 2c
+# 01 00 00` is therefore a strong-and-cheap discriminator: Compal files
+# contain hundreds of these (one per chip, mostly), Gigabyte files
+# contain essentially zero (the bytes are a specific 8-byte constant
+# extremely unlikely to occur by chance in trace data or other records).
+# See TVW_FORMAT.html §14 (Variant detection) for the full discriminator
+# survey and threshold rationale.
+_COMPAL_R1_SIGNATURE = b"\xb8\x0b\x00\x00\x2c\x01\x00\x00"
+_COMPAL_R1_THRESHOLD = 100
+
+
+def _detect_variant(data: bytes) -> str:
+    """Detect whether a TVW byte buffer is the Gigabyte variant or the
+    Compal/Lenovo variant. Returns ``"compal_lenovo"`` or ``"gigabyte"``.
+
+    Default is ``"gigabyte"`` — the historical decoder is calibrated for
+    Gigabyte boards, and producing a (potentially wrong) parse via the
+    Gigabyte path is preferable to silently returning an empty model if
+    the discriminator misclassifies a Gigabyte file. Compal-variant
+    detection is intentionally conservative (high threshold) to avoid
+    false positives on Gigabyte's GPU files which can contain unusual
+    byte patterns in their wider trace regions.
+    """
+    n = data.count(_COMPAL_R1_SIGNATURE)
+    if n > _COMPAL_R1_THRESHOLD:
+        return "compal_lenovo"
+    return "gigabyte"
+
+
+def _parse_compal(path: Path) -> BoardModel:
+    """Stub parser for the Compal/Lenovo TVW variant.
+
+    The Compal variant deviates from Gigabyte in several structural
+    places — chip enumeration uses a different anchor pattern, layer pad
+    records are 19-byte stride (not 38), and the master footprint pool
+    starts ~234 KB earlier in the file. See TVW_FORMAT.html and GitHub
+    issue #1 for the full format characterisation.
+
+    This stub returns an empty BoardModel with a single warning so the
+    viewer surfaces a clear "variant not yet supported" message rather
+    than silently producing wrong output. The full Compal decoder lands
+    in a follow-up commit.
+    """
+    model = BoardModel()
+    # `warnings` is a free-form list checked by the viewer via getattr —
+    # it isn't part of BoardModel's slots, just an attached attribute.
+    model.warnings = [
+        f"{Path(path).name}: detected as Compal/Lenovo TVW variant "
+        f"(e.g. Lenovo Thinkpad NM-B501 motherboards). Full parser for "
+        f"this variant is in progress — currently returning an empty "
+        f"model. Tracking: GitHub issue #1. See TVW_FORMAT.html in this "
+        f"repo for the decoded format spec."
+    ]
+    return model
+
+
 def parse(path: Path) -> BoardModel:
+    """Public entry point. Detects the file's TVW variant and dispatches
+    to the appropriate decoder.
+
+    Gigabyte files (Z490, X570, B550, GPU boards) go through the
+    historical decoder, unchanged. Compal/Lenovo files (Thinkpad
+    NM-B501, etc.) currently return a stub with a warning until the
+    Compal decoder lands.
+    """
+    data = Path(path).read_bytes()
+    if _detect_variant(data) == "compal_lenovo":
+        return _parse_compal(path)
+    return _parse_gigabyte(path)
+
+
+def _parse_gigabyte(path: Path) -> BoardModel:
+    """Gigabyte-variant TVW decoder. Historical body of ``parse()`` —
+    no behavioural changes vs the pre-dispatch implementation.
+    """
     data = Path(path).read_bytes()
     model = BoardModel()
 
