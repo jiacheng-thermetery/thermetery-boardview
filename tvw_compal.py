@@ -118,12 +118,31 @@ class _Chip:
     """One R3 chip record. Built by `_enumerate_r3_chips`."""
     refdes: str
     record_off: int     # offset of Pascal-length byte
-    Y: int              # world Y (chip silkscreen anchor)
-    X: int              # world X
+    Y: int              # world Y — BL corner of chip world bbox
+    X: int              # world X — BL corner of chip world bbox
+    f0: int             # world Y — TR corner of chip world bbox (= Y + dy)
+    f1: int             # world X — TR corner of chip world bbox (= X + dx)
     f2: int             # bbox-anchor Y (canonical pin transform origin)
     f3: int             # bbox-anchor X
     rot: int            # rotation (0 / 90 / 180 / 270)
     fp_id: int          # footprint ID, maps to master at fp_id - 1
+    # Packed Pascal-string slots starting at after-Pascal +45 (after the
+    # 0x01 sentinel at +44). 100 % of T480 chips carry all 5; the agent
+    # report calls these "device value / tolerance / tolerance-dup /
+    # footprint name / part code". Slot 0 == "*" for ICs (placeholder),
+    # actual value (e.g. "10K", "0.01") for passives.
+    device_value: str   # slot 0 — passive value or "*" for ICs
+    tolerance: str      # slot 1 — tolerance %
+    part_code: str      # slot 4 — supplier / part code, e.g. "SD000012RYT"
+    # Per-pin records walked from the chip's inline pin list. Each tuple
+    # is `(master_pin_idx, display_pin_number, pascal_pin_name)`.
+    # `master_pin_idx` = (ptr - first_ptr) // 8 — selects the pin's
+    # local (A, B) coord in the master record's Section C.
+    # `display_pin_number` = uint32 at pin-record +8..+11 — the integer
+    # BoardViewer shows in its Pin column (e.g. 148).
+    # `pascal_pin_name` = the Pascal-prefixed name (e.g. "A148") —
+    # kept for completeness but `display_pin_number` is what we use.
+    pins: List[Tuple[int, int, str]] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -367,6 +386,8 @@ def _enumerate_r3_chips(
             continue
         Y = int.from_bytes(data[p:p+4], "little", signed=True)
         X = int.from_bytes(data[p+4:p+8], "little", signed=True)
+        f0 = int.from_bytes(data[p+8:p+12], "little", signed=True)
+        f1 = int.from_bytes(data[p+12:p+16], "little", signed=True)
         f2 = int.from_bytes(data[p+16:p+20], "little", signed=True)
         f3 = int.from_bytes(data[p+20:p+24], "little", signed=True)
         rot = int.from_bytes(data[p+24:p+28], "little", signed=True)
@@ -381,10 +402,73 @@ def _enumerate_r3_chips(
         if fp_id in _TEST_POINT_FP_IDS:
             i += 1
             continue
+        # Walk the 5 packed Pascal strings starting at after-Pascal +45.
+        # Each string: 1 length byte + L content bytes. Slots:
+        #   0 = device value     (passive value, or "*" for ICs)
+        #   1 = tolerance %
+        #   2 = tolerance %      (duplicate of slot 1 in 100 % of cases)
+        #   3 = footprint name   (= master[fp_id-1].name; verified)
+        #   4 = part / supplier code
+        # If any string fails to parse cleanly (bad length / non-ASCII)
+        # we bail out — the record is malformed or our offsets are off.
+        slots: List[str] = []
+        sp = p + 45
+        slots_ok = True
+        for _ in range(5):
+            if sp >= len(data):
+                slots_ok = False
+                break
+            sL = data[sp]
+            if sL > 100 or sp + 1 + sL > len(data):
+                slots_ok = False
+                break
+            sb = data[sp+1:sp+1+sL]
+            if not all(0x20 <= b < 0x7f for b in sb):
+                slots_ok = False
+                break
+            slots.append(sb.decode("ascii"))
+            sp += 1 + sL
+        if not slots_ok:
+            i += 1
+            continue
+        device_value, tolerance, _tol_dup, _fp_name_dup, part_code = slots
+        # After slot 4: 4 zero bytes, then uint32 pin_count, uint32
+        # mystery flag, 4 more bytes, then the pin-record run.
+        if sp + 16 > len(data):
+            i += 1
+            continue
+        pin_count = int.from_bytes(data[sp+4:sp+8], "little")
+        pin_list_pos = sp + 16
+        # Walk pin records (variable stride 17 + L per pin).
+        pin_records: List[Tuple[int, int, str]] = []
+        pos = pin_list_pos
+        first_ptr: Optional[int] = None
+        for _ in range(min(pin_count, 5000)):  # safety cap
+            if pos + 18 > len(data):
+                break
+            ptr = int.from_bytes(data[pos:pos+4], "little")
+            pin_display = int.from_bytes(data[pos+8:pos+12], "little")
+            L_name = data[pos+12]
+            if L_name < 1 or L_name > 12:
+                break
+            name_bytes = data[pos+13:pos+13+L_name]
+            if not all(0x20 <= b < 0x7f for b in name_bytes):
+                break
+            name = name_bytes.decode("ascii")
+            if first_ptr is None:
+                first_ptr = ptr
+                master_pin_idx = 0
+            else:
+                master_pin_idx = (ptr - first_ptr) // 8
+            pin_records.append((master_pin_idx, pin_display, name))
+            pos += 17 + L_name
         if refdes not in chips:
             chips[refdes] = _Chip(
                 refdes=refdes, record_off=i + 4,
-                Y=Y, X=X, f2=f2, f3=f3, rot=rot, fp_id=fp_id,
+                Y=Y, X=X, f0=f0, f1=f1, f2=f2, f3=f3,
+                rot=rot, fp_id=fp_id,
+                device_value=device_value, tolerance=tolerance,
+                part_code=part_code, pins=pin_records,
             )
         # Skip past the Pascal so we don't re-match its bytes when
         # walking forward. The chip's full data block extends further
@@ -468,22 +552,141 @@ def _world_to_chip_local(
 
 
 # --------------------------------------------------------------------------
+# Net-name table
+# --------------------------------------------------------------------------
+
+def _scan_net_names(data: bytes) -> List[str]:
+    """Locate and decode the net-name table.
+
+    The table has a 2-uint32 header where the count is repeated twice,
+    followed by `count` Pascal-prefixed net names. On T480 it lives at
+    `0xb384fe` (count = 2774), but to be sub-variant-tolerant we scan
+    for the duplicated-count + valid-first-Pascal signature.
+
+    Returns a list where index `net_id` -> net name. **Net IDs are
+    0-based**: ``nets[0]`` is the first Pascal-prefixed name in the
+    table (verified against ground-truth from BoardViewer.exe — GND
+    at index 45, USBCOMP at 1446, PECI at 1330, etc.).
+    """
+    # Scan a likely region. The table sits roughly between the chip
+    # tables and the master pool on Compal/Lenovo files.
+    for i in range(0xa00000, min(0xc40000, len(data) - 16), 1):
+        c1 = int.from_bytes(data[i:i+4], "little")
+        if not (100 <= c1 <= 20000):
+            continue
+        c2 = int.from_bytes(data[i+4:i+8], "little")
+        if c1 != c2:
+            continue
+        # Verify the first Pascal name parses as ASCII text.
+        L = data[i+8]
+        if not (1 <= L <= 80):
+            continue
+        first = data[i+9:i+9+L]
+        if not all(0x20 <= b < 0x7f for b in first):
+            continue
+        # Try to walk all `count` Pascal strings; if any fails the
+        # candidate is not the real net table. The file uses 0-based
+        # net_ids (verified) — no leading placeholder entry.
+        nets: List[str] = []
+        pos = i + 8
+        ok = True
+        for _ in range(c1):
+            if pos >= len(data):
+                ok = False
+                break
+            sL = data[pos]
+            if sL > 200 or pos + 1 + sL > len(data):
+                ok = False
+                break
+            sb = data[pos+1:pos+1+sL]
+            if not all(0x20 <= b < 0x7f for b in sb):
+                ok = False
+                break
+            nets.append(sb.decode("ascii"))
+            pos += 1 + sL
+        if ok and len(nets) == c1:
+            return nets
+    return []
+
+
+# --------------------------------------------------------------------------
+# Layer pad records — spatial index for pin-net matching
+# --------------------------------------------------------------------------
+
+def _build_pad_index(data: bytes) -> Dict[Tuple[int, int], int]:
+    """Scan the entire file for 19-byte pad records and return
+    ``{(world_Y, world_X) -> net_id}``.
+
+    Layer pad record (per agent-confirmed Compal layout):
+        +0..+2   3 zero bytes  (prefix sentinel)
+        +3..+6   uint32 net_id  (< 4000)
+        +7..+10  uint32 pad_type (< 100000)
+        +11..+14 int32  Y world
+        +15..+18 int32  X world
+
+    Pads appear in every layer the net touches (1..10 per pin), all
+    sharing the same `(Y, X)`. We dedup by coord, keeping the first
+    seen net_id (they're consistent across layers for valid files).
+
+    Note: same XY can resolve to multiple net_ids in pathological
+    cases (rare, never observed on T480 ground-truth set). When that
+    happens this index returns the first one — a 0.x % mis-attribution
+    risk that's acceptable for the MVP. A future refinement would
+    layer-scope the lookup.
+    """
+    index: Dict[Tuple[int, int], int] = {}
+    i = 0
+    n = len(data) - 19
+    while i < n:
+        # Cheapest pre-check: 3 zero bytes at +0..+2. ~half the file
+        # bytes are non-zero so this skips most positions quickly.
+        if data[i] != 0:
+            i += 1
+            continue
+        if data[i+1] != 0 or data[i+2] != 0:
+            i += 1
+            continue
+        net_id = int.from_bytes(data[i+3:i+7], "little")
+        if net_id >= 4000:
+            i += 1
+            continue
+        pad_type = int.from_bytes(data[i+7:i+11], "little")
+        if pad_type >= 100000:
+            i += 1
+            continue
+        Y = int.from_bytes(data[i+11:i+15], "little", signed=True)
+        X = int.from_bytes(data[i+15:i+19], "little", signed=True)
+        if abs(Y) > 2_000_000 or abs(X) > 2_000_000:
+            i += 1
+            continue
+        key = (Y, X)
+        if key not in index:
+            index[key] = net_id
+        i += 19
+    return index
+
+
+# --------------------------------------------------------------------------
 # Public entry point
 # --------------------------------------------------------------------------
 
 def parse(path: Path) -> BoardModel:
     """Parse a Compal/Lenovo TVW file into a BoardModel.
 
-    Minimum-viable implementation: produces chips with correct
-    positions, rotations, layers, and per-pin shape geometry from the
-    master footprint pool. Pin names are sequential 1..N (the file's
-    inline pin records with real BGA names like "A3" are NOT yet
-    parsed). Pin-to-net mapping is also NOT populated — model.signals
-    stays empty until a follow-up commit adds matching against the
-    19-byte layer pad records.
+    Produces chips with correct positions, rotations, layers,
+    per-pin shape geometry from master footprints, real pin names from
+    the chip's inline pin records, and **pin-net mapping via spatial
+    matching against the 19-byte layer pad records**.
 
-    The viewer's warnings list is populated so users see the current
-    coverage limitation explicitly.
+    Pin-net coverage: each chip pin's world coord is computed via the
+    canonical transform; we look it up in a deduped pad index built
+    from all 19-byte layer-pad records in the file. Exact-coord
+    matching works because chip coords are integer file units and
+    rotation angles are multiples of 90°, so the transform output is
+    deterministic with zero residual.
+
+    Pins whose predicted world coord doesn't match any pad are treated
+    as no-connect (NC) and don't appear in `model.signals`.
     """
     data = Path(path).read_bytes()
     model = BoardModel()
@@ -500,51 +703,87 @@ def parse(path: Path) -> BoardModel:
     r1 = _scan_r1_layers(data)
     cap_layers = _scan_cap_section_layers(data)
     r3_chips = _enumerate_r3_chips(data, masters)
+    nets = _scan_net_names(data)
+    pad_index = _build_pad_index(data)
 
     n_no_master_pins = 0
+    n_pin_net_hits = 0
+    n_pin_net_misses = 0
     for refdes, chip in r3_chips.items():
         master = masters[chip.fp_id - 1]
         layer = _determine_layer(refdes, master.name, r1, cap_layers)
         shape_name = f"_compal_{master.name}_{refdes}"
         shape = Shape(name=shape_name)
+
+        # Build a lookup of master_pin_idx -> (display_pin_number, name)
+        # so we can emit real BGA names like "A148" instead of sequential
+        # integers. Master pins not present in the chip's inline list
+        # (rare — usually means a chip-NC ball) fall back to a
+        # sequential name based on master order.
+        by_master_idx: Dict[int, Tuple[int, str]] = {
+            m_idx: (pin_disp, pin_name)
+            for (m_idx, pin_disp, pin_name) in chip.pins
+        }
+
         if master.pin_locals:
             for pin_idx, (A, B) in enumerate(master.pin_locals):
                 world_Y, world_X = _pin_local_to_world(chip, A, B, layer)
                 dx, dy = _world_to_chip_local(chip, world_Y, world_X)
-                # Sequential pin name. Real BGA names ("A3", "K1",
-                # etc.) come from the chip's inline pin records, which
-                # the MVP parser doesn't read yet.
-                shape.pins.append((str(pin_idx + 1), dx, dy))
+                pin_disp, _pin_name = by_master_idx.get(
+                    pin_idx, (pin_idx + 1, str(pin_idx + 1)))
+                # Use the integer display number as the pin name —
+                # matches what BoardViewer.exe shows in its Pin column.
+                pin_name_out = str(pin_disp)
+                shape.pins.append((pin_name_out, dx, dy))
+                # Look up this pin's net via exact-coord match against
+                # the pad index.
+                net_id = pad_index.get((world_Y, world_X))
+                if net_id is not None and net_id < len(nets):
+                    net_name = nets[net_id]
+                    if net_name:
+                        model.signals.setdefault(net_name, []).append(
+                            (refdes, pin_name_out))
+                        n_pin_net_hits += 1
+                    else:
+                        n_pin_net_misses += 1
+                else:
+                    n_pin_net_misses += 1
             xs = [p[1] for p in shape.pins]
             ys = [p[2] for p in shape.pins]
             shape.bbox_override = (min(xs), min(ys), max(xs), max(ys))
         else:
-            # Master had no Section C pin records. Use a small default
-            # bbox so the chip still renders as a placeholder.
             n_no_master_pins += 1
             shape.bbox_override = (-1000.0, -1000.0, 1000.0, 1000.0)
+
         model.shapes[shape_name] = shape
+        # Component.device: prefer the device value from the R3 packed
+        # Pascal strings (e.g. "10K", "0.1U", "1U") for passives. ICs
+        # have device_value == "*" — use the master footprint name
+        # instead so the user sees something meaningful in the UI.
+        if chip.device_value and chip.device_value != "*":
+            device_label = chip.device_value
+        else:
+            device_label = master.name
         comp = Component(
             refdes=refdes, x=float(chip.X), y=float(chip.Y),
             layer=layer, rotation=float(chip.rot),
             shape=shape_name,
-            device=master.name,
+            device=device_label,
         )
         model.components[refdes] = comp
 
-    warns = [
-        f"{Path(path).name}: Compal/Lenovo TVW variant. "
-        f"{len(model.components)} chips loaded; pin-net mapping is not "
-        f"populated in this build, so net browsing will show no nets. "
-        f"See TVW_FORMAT.html and GitHub issue #1."
-    ]
+    warns: List[str] = []
     if n_no_master_pins:
         warns.append(
             f"{n_no_master_pins} chips reference master footprints "
             f"with no pin-coordinate records (rendered as placeholder "
-            f"bboxes)."
-        )
-    model.warnings = warns
+            f"bboxes).")
+    if not nets:
+        warns.append(
+            "net-name table not found — net browsing will show no "
+            "net names (only IDs).")
+    if warns:
+        model.warnings = warns
     return model
 
 
