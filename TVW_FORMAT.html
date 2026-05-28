@@ -359,7 +359,8 @@ Verified on the Lenovo Thinkpad T480 NM-B501R10 (10 copper layers). Sometimes ca
     <tr><td>+20..+23</td><td>int32 LE</td><td><code>f3</code> — canonical pin anchor X</td></tr>
     <tr><td>+24..+27</td><td>int32 LE</td><td>rotation (0 / 90 / 180 / 270)</td></tr>
     <tr><td>+28..+31</td><td>int32 LE</td><td><code>fp_id</code> — footprint ID (master_idx = fp_id − 1)</td></tr>
-    <tr><td>+32..+43</td><td>12 bytes</td><td>zeros (all 0x00)</td></tr>
+    <tr><td>+32..+35</td><td>uint32 LE</td><td><strong><code>chip_class</code></strong> — chip-type enum (see <a href="#chip-class">§5.1.1</a>). Earlier drafts treated this as part of a "12 zero bytes" block; that was wrong, only +36..+43 are zero. The field is non-zero for 2688 of 2754 chips on T480.</td></tr>
+    <tr><td>+36..+43</td><td>8 bytes</td><td>zeros (all 0x00)</td></tr>
     <tr><td>+44</td><td>byte</td><td><strong>0x01 chip-record sentinel</strong> (single byte; the historical "01 01 2a 00" pattern is just this sentinel followed by the first Pascal length 0x01 and the <code>'*'</code> placeholder used in IC device-value slots — see Pascal #1 below)</td></tr>
     <tr><td>+45..</td><td>Pascal #1</td><td>device value — passive value like <code>"10K"</code>, <code>"0.1U"</code>, <code>"1U"</code>; <code>"*"</code> for ICs</td></tr>
     <tr><td>after #1</td><td>Pascal #2</td><td>tolerance — e.g. <code>"5%"</code>, <code>"1%"</code>, <code>"*"</code> for ICs</td></tr>
@@ -392,6 +393,31 @@ Verified on the Lenovo Thinkpad T480 NM-B501R10 (10 copper layers). Sometimes ca
 <p><strong>Pin → master link:</strong> <code>master_pin_idx = (ptr - first_ptr) // 8</code>. The master record's Section C (per-pin local coords) at this index gives the pin's local <code>(A, B)</code> position.</p>
 
 <p><strong>Why two pin labels?</strong> The Pascal string carries the manufacturer's BGA grid notation (e.g. <code>"A148"</code>) and the uint32 at +8 carries the equivalent integer position (148). For non-BGA chips (QFN/SOIC) the two collapse to the same value. We expose the integer because that's what BoardViewer.exe shows by default and the ground-truth references (e.g. "U58.148 = USBCOMP") use it.</p>
+
+<h4 id="chip-class">5.1.1 <code>chip_class</code> enum (R3 +32..+35)</h4>
+
+<p><span class="tag tag-ok">verified</span> The uint32 at chip after-Pascal +32..+35 encodes a chip-type that controls the pin-coord transform. T480 contains 13 values:</p>
+
+<table>
+  <thead><tr><th>Value</th><th>Count</th><th>Meaning</th><th>Examples</th><th>Needs special transform?</th></tr></thead>
+  <tbody>
+    <tr><td><code>0</code></td><td>66</td><td>IC / BGA</td><td>U58, U186, U208</td><td>no — canonical</td></tr>
+    <tr><td><code>1</code></td><td>142</td><td>LED / Diode</td><td>LED1, PD7</td><td>no — canonical</td></tr>
+    <tr><td><code>2</code></td><td>82</td><td>MOSFET / Transistor</td><td>PQ601, Q199</td><td>no — canonical</td></tr>
+    <tr><td><code>3</code></td><td>1083</td><td>Resistor</td><td>PR146, R564</td><td>no — canonical</td></tr>
+    <tr><td><code>5</code></td><td>1202</td><td>Capacitor</td><td>C562, PC412</td><td>no — canonical</td></tr>
+    <tr><td><code>9</code></td><td>18</td><td>Test jack</td><td>PJ2, PJ305</td><td>no — canonical</td></tr>
+    <tr><td><code>13</code></td><td>29</td><td>Fuse</td><td>F60, PF3</td><td>no — canonical</td></tr>
+    <tr><td><code>14</code></td><td>40</td><td>Inductor</td><td>PL601, PL202</td><td>no — canonical</td></tr>
+    <tr><td><code>15</code></td><td>7</td><td>Crystal</td><td>Y1, Y2</td><td>no — canonical</td></tr>
+    <tr><td><code>16</code></td><td>3</td><td>Switch</td><td>S1, S3</td><td>no — canonical</td></tr>
+    <tr><td><code>17</code></td><td>30</td><td><strong>Connector</strong></td><td>JKBL1, JDDR1, JTAG2, JDOCK1, JLAN1, JLCD1</td><td><strong>yes</strong> — see §11.1</td></tr>
+    <tr><td><code>18</code></td><td>46</td><td>Test point</td><td>TP151, TP153</td><td>no (1-pin, no Section C)</td></tr>
+    <tr><td><code>29</code></td><td>6</td><td>Fiducial</td><td>FD1, FD2</td><td>no (1-pin, no Section C)</td></tr>
+  </tbody>
+</table>
+
+<p>Classes 3 (resistor) and 5 (capacitor) are perfectly symmetric under (A, B) ↔ (−A, −B) in their masters — pin-1 vs pin-2 labels on these passives can't be verified spatially. Net assignment is identical either way; pin number swaps don't affect electrical behaviour.</p>
 
 <h3 id="chip-cap">5.2 Cap-section records <a class="anchor-link" href="#chip-cap">#</a></h3>
 <p><span class="tag tag-ok">verified</span> Uses the Gigabyte-style <code>0x01 + Pascal-dev_name + Pascal-footprint</code> chip-header pattern. The existing <code>_find_chip_headers()</code> in <code>tvw_parser.py</code> detects these. On T480 they cover ~884 chips, mostly small passives (C, P refdes).</p>
@@ -485,23 +511,36 @@ Verified on the Lenovo Thinkpad T480 NM-B501R10 (10 copper layers). Sometimes ca
 
 <h2 id="layer-pads">7. Layer pad records <a class="anchor-link" href="#layer-pads">#</a></h2>
 
-<p><span class="tag tag-ok">verified</span> Compal/Lenovo uses <strong>19-byte stride layer pad records</strong> for all 10 copper layers. Format:</p>
+<p><span class="tag tag-ok">verified</span> Compal/Lenovo uses <strong>19-byte stride layer pad records</strong> for all 10 copper layers AND for the connector / through-hole / BGA-ring runs in the 0x008d8000..0x00914012 gap. Format:</p>
 
 <table class="layout">
   <thead><tr><th>Offset</th><th>Type</th><th>Field</th></tr></thead>
   <tbody>
-    <tr><td>+0..+2</td><td>3 zero bytes</td><td>prefix (100% pure across 71,630 records)</td></tr>
+    <tr><td>+0..+1</td><td>2 zero bytes</td><td>record sentinel (cheap pre-filter)</td></tr>
+    <tr><td>+2</td><td>uint8</td><td><strong>pad-shape enum</strong> (see callout)</td></tr>
     <tr><td>+3..+6</td><td>uint32</td><td>net_id (&lt; 4000, indexes net-name table)</td></tr>
-    <tr><td>+7..+10</td><td>uint32</td><td>pad_type (indexes per-region aperture table)</td></tr>
+    <tr><td>+7..+10</td><td>uint32</td><td>pad_type (&gt; 0, indexes per-region aperture table)</td></tr>
     <tr><td>+11..+14</td><td>int32</td><td>Y world</td></tr>
     <tr><td>+15..+18</td><td>int32</td><td>X world</td></tr>
   </tbody>
 </table>
 
-<p>71,630 records total across 10 layer regions. 18,697 unique <code>(Y, X)</code> positions. Pads appearing in multiple layer regions = through-vias.</p>
+<p>~180,000 records total across 10 layer regions + the gap region. <strong>40,031 unique <code>(Y, X)</code> positions</strong> (up from 28,856 when we required a 3-zero prefix). Pads appearing in multiple regions = through-vias.</p>
 
 <div class="callout">
-<strong>Common pitfall:</strong> The Gigabyte 38-byte pad-record scanner, applied naïvely to Compal/Lenovo, reads two adjacent 19-byte records as one 38-byte record. The "first half" looks like garbage (it's another pad's data), and the count comes out at exactly half. Confirm format by checking the <code>00 00 00</code> 3-byte prefix.
+<strong>Pad-shape enum (+2 byte):</strong>
+<ul>
+  <li><code>0x00</code> — standard SMD surface pad (150,338 records)</li>
+  <li><code>0x01</code> — SMD pad, alternate footprint variant (2,742 records)</li>
+  <li><code>0x02</code> — through-hole / via-attached connector pin (10,727 records)</li>
+  <li><code>0x05</code> — BGA-style pad with annular ring (9,583 records)</li>
+  <li><code>0x08</code> — press-fit / mechanical-mount pin, e.g. dock / USB-C ground tab (4,197 records)</li>
+</ul>
+<p>Earlier drafts of this spec treated +0..+2 as a 3-zero sentinel. That hid 11,175 unique pad coords concentrated in the 0x008d8000..0x00914012 region (between GND1 end and BOTTOM trace start) — primarily connector through-holes and mounting tabs. Without those, all class-17 connectors (JKBL1, JTAG2, JDDR1, ...) returned empty pin → net mappings.</p>
+</div>
+
+<div class="callout">
+<strong>Common pitfall:</strong> The Gigabyte 38-byte pad-record scanner, applied naïvely to Compal/Lenovo, reads two adjacent 19-byte records as one 38-byte record. The "first half" looks like garbage (it's another pad's data), and the count comes out at exactly half. Confirm format by checking the 2-byte zero prefix + plausible net_id + non-zero pad_type.
 </div>
 
 <h3 id="aperture">7.1 Per-region aperture tables <a class="anchor-link" href="#aperture">#</a></h3>
@@ -626,17 +665,32 @@ uint32     ap_count_header   (= max_pad_type + 1)
                             after-Pascal +8..+23.
     (A_local, B_local):      the two int32s from a 19-byte master
                             Section C record.
+    chip['chip_class']:      uint32 at R3 +32..+35. Connectors
+                            (class=17) require an additional negate
+                            step (see below); all other classes use
+                            the canonical rule.
     """
     rot = chip['rot']
     if   rot ==   0: dy, dx = -A_local, -B_local
     elif rot ==  90: dy, dx = -B_local,  A_local
     elif rot == 180: dy, dx =  A_local,  B_local
     elif rot == 270: dy, dx =  B_local, -A_local
+
+    # Connector class — pin frame matches canonical only for the two
+    # "natural" placements (rot ∈ {0, 180} on BOTTOM). Other (rot, layer)
+    # combinations require an extra negation BEFORE the BOTTOM flip.
+    if chip['chip_class'] == 17:
+        if not (rot in (0, 180) and layer == 'BOTTOM'):
+            dy, dx = -dy, -dx
+
     if layer == 'BOTTOM':
         dx = -dx        # BOTTOM-side chips mirror world-X delta
     return (chip['f2'] + dy, chip['f3'] + dx)</code></pre>
 
-<p><strong>Verification: 216 chips across all 4 rotations × both layers × diverse component types (BGA, QFN, MOSFET, connector, diode) — every pin whose pad exists matches with 0 residual.</strong></p>
+<p><strong>Verification: 216 chips across all 4 rotations × both layers × diverse component types (BGA, QFN, MOSFET, connector, diode) — every pin whose pad exists matches with 0 residual.</strong> Connector-specific verification: JKBL1 (38/38 pins), JTAG2 (8/8 pins), plus pin-1 spot checks on JLAN1, JDOCK1, JHDMI1, JUSBC1, J41 — all match with 0 residual.</p>
+
+<h4>Why class-17 needs the extra negate (heuristic explanation)</h4>
+<p>For ICs, the chip's bounding-box anchor <code>(f2, f3)</code> happens to align with the "logical pin 1 corner" of the IC master at every rotation. For connectors, the anchor aligns with the OPPOSITE corner in the four non-canonical placements (TOP-side, or 90°/270° on BOTTOM). The single-line negate restores the consistent anchor → pin-1 alignment without needing a 6-row (rot, layer)-keyed lookup table.</p>
 
 <div class="callout">
 <strong>About the 16-byte bbox field:</strong> the field at chip R3 +8..+23 contains 4 int32s <code>(f0, f1, f2, f3)</code>. The semantics differ wildly across component types — for BGAs it's a constant 700×700 box; for QFN/MOSFET it approximates the chip body; for connectors it's a long thin rectangle. The values <em>look</em> inconsistent because they probably encode different things per chip-type, but <code>(f2, f3)</code> consistently works as the canonical pin anchor. Treat <code>(f0, f1)</code> as the TR-corner of the chip-body bbox (vs <code>(Y, X)</code> as the BL-corner) — useful for placement/bbox rendering, not for pin transforms.
@@ -648,8 +702,8 @@ uint32     ap_count_header   (= max_pad_type + 1)
 
 <h4>Algorithm</h4>
 <ol>
-  <li>Walk every 19-byte layer-pad record in the file (see <a href="#layer-pads">section 7</a>) and build a deduped spatial index <code>{(world_Y, world_X) -&gt; net_id}</code>. T480: 71,630 pad records collapse to 18,697 unique <code>(Y, X)</code> keys after deduplication across the 10 copper layers.</li>
-  <li>For each chip pin, compute its predicted world coord using the <a href="#pin-transform">canonical transform</a> from §11.1.</li>
+  <li>Walk every 19-byte layer-pad record in the file (see <a href="#layer-pads">section 7</a>) and build a deduped spatial index <code>{(world_Y, world_X) -&gt; net_id}</code>. T480: ~180,000 pad records collapse to <strong>40,031 unique <code>(Y, X)</code> keys</strong> after deduplication across the 10 copper layers plus the gap region.</li>
+  <li>For each chip pin, compute its predicted world coord using the transform from §11.1 (with the class-17 negate if applicable).</li>
   <li>Exact-integer lookup in the spatial index. Hit → <code>net_name = nets[net_id]</code> (0-based); miss → pin is no-connect (NC) and is not added to <code>model.signals</code>.</li>
 </ol>
 
@@ -657,27 +711,35 @@ uint32     ap_count_header   (= max_pad_type + 1)
 
 <h4>Reference implementation</h4>
 <pre><code>def build_pad_index(data):
-    """Single linear pass over the file. Three-zero prefix is the
-    cheap pre-filter (~50% of file bytes fail it, skipping fast)."""
+    """Single linear pass over the file. Two-zero prefix is the
+    cheap pre-filter; the +2 byte is a pad-shape enum, NOT a record
+    sentinel — see §7 callout."""
     index = {}
     i = 0
     n = len(data) - 19
     while i &lt; n:
-        if data[i] != 0 or data[i+1] != 0 or data[i+2] != 0:
+        # Only 2 zero bytes required at +0..+1. The +2 byte is a
+        # pad-shape enum (0=plain, 1=variant, 2=through-hole,
+        # 5=BGA ring, 8=press-fit). Filtering on +2==0 hid 11k
+        # connector / via / through-hole pads.
+        if data[i] != 0 or data[i+1] != 0:
             i += 1
             continue
         net_id   = int.from_bytes(data[i+3 :i+7 ], "little")
         pad_type = int.from_bytes(data[i+7 :i+11], "little")
         Y        = int.from_bytes(data[i+11:i+15], "little", signed=True)
         X        = int.from_bytes(data[i+15:i+19], "little", signed=True)
+        # pad_type==0 is the most common false positive (zero-padded
+        # alignment slack between regions). Real pad_types start at 1.
         if (net_id  &lt; 4000
-            and pad_type &lt; 100000
+            and 0 &lt; pad_type &lt; 100000
             and abs(Y) &lt; 2_000_000
             and abs(X) &lt; 2_000_000):
             index.setdefault((Y, X), net_id)
-            i += 19
-        else:
-            i += 1
+        # Byte-aligned advance — the gap-region records don't sit on
+        # a stride-19 grid relative to file position 0. The dedup via
+        # setdefault handles overlapping false-matches cleanly.
+        i += 1
     return index
 
 def chip_pin_to_net(chip, A, B, layer, nets, pad_index):
@@ -689,19 +751,17 @@ def chip_pin_to_net(chip, A, B, layer, nets, pad_index):
 
 <h4>Bounds (the 4000 / 100000 / 2,000,000 thresholds)</h4>
 <ul>
-  <li><code>net_id &lt; 4000</code> — T480 has 2,774 nets; the threshold is loose enough to admit any plausible motherboard but tight enough to reject random 32-bit values inside other record types that happen to share the 3-zero prefix.</li>
-  <li><code>pad_type &lt; 100000</code> — aperture indexes; in practice all observed values are ≤ ~280.</li>
+  <li><code>net_id &lt; 4000</code> — T480 has 2,774 nets; the threshold is loose enough to admit any plausible motherboard but tight enough to reject random 32-bit values inside other record types that happen to share the 2-zero prefix.</li>
+  <li><code>0 &lt; pad_type &lt; 100000</code> — aperture indexes; in practice all observed values are 1..~280 for layer aperture entries (master pad-shape references can go higher but stay well under 100k). <code>pad_type == 0</code> is rejected to filter out zero-padded alignment slack between record runs.</li>
   <li><code>|Y|, |X| &lt; 2,000,000 file units</code> — ≈ 640 mm board span limit. T480 board envelope is roughly ±900,000 fu.</li>
 </ul>
 
-<p>These filters reject false-positive matches inside trace data and chip records to within 0.0 % observed error on T480.</p>
-
 <h4>Coverage and NC rate on T480</h4>
 <ul>
-  <li>2,754 chips, sum of pin counts (from R3 inline pin lists) = 8,330</li>
-  <li>Spatial match hits: 7,149 — produces <code>model.signals</code> entries</li>
-  <li>Misses: 1,181 (~14 %) — interpreted as NC. Dominated by internal BGA NC balls (U58 has many) and unused connector pins. None of the 9 ground-truth pairs are in this miss set.</li>
-  <li>2,566 unique nets populated (out of 2,774 in the name table).</li>
+  <li>2,754 chips, sum of pin counts (from R3 inline pin lists) ≈ 12,000+ after the master-pin off-by-one fix</li>
+  <li>Spatial match hits: <strong>10,203</strong> — produces <code>model.signals</code> entries (was 7,149 before the §7 prefix relaxation, §5.1 chip_class capture, §11.1 class-17 transform, and the master-pin off-by-one fix all landed)</li>
+  <li><strong>2,717 unique nets populated</strong> (out of 2,774 in the name table). Remaining 57 are typically NC test points or board-internal scratch nets.</li>
+  <li>19/19 ground-truth pin → net pairs pass on the current parser (was 9/9 before the connector + chip_class work).</li>
 </ul>
 
 <div class="callout">
@@ -783,6 +843,14 @@ def chip_pin_to_net(chip, A, B, layer, nets, pad_index):
   <li>The "21-byte stride aux table" and "19-byte U-index table" earlier mistaken for missing-chip sources — they're the pin lists of U208 and U58, respectively. Already covered by R3.</li>
 </ul>
 
+<h4>Decoded in May 2026 (closed)</h4>
+<ul>
+  <li><strong>uint32 chip_class at R3 +32..+35</strong> — 13-value enum discriminating IC / passive / connector / fiducial / test-point. See <a href="#chip-class">§5.1.1</a>. Only class=17 (connector) requires a non-canonical pin transform; the other 12 use the canonical rule.</li>
+  <li><strong>+2 pad-shape enum byte in 19-byte pad records</strong> — values 0/1/2/5/8 distinguish plain SMD / variant / through-hole / BGA-ring / press-fit. Earlier drafts wrongly treated +0..+2 as a 3-zero sentinel; relaxing to a 2-zero sentinel added 11,175 pad coords (mostly connector through-holes).</li>
+  <li><strong>0x008d8000..0x00914012 region</strong> — was the unscanned "gap between GND1 and BOTTOM" and contained 7,348 connector / through-hole / BGA-ring pad records. Now covered by <code>_build_pad_index</code>.</li>
+  <li><strong><code>_extract_master_pins</code> off-by-one</strong> — fence-post error in the pair-up loop. Now emits all sentinels in each consecutive 19-spaced run.</li>
+</ul>
+
 <h2 id="anchors">16. Ground-truth anchors <a class="anchor-link" href="#anchors">#</a></h2>
 
 <p>Used throughout this spec for verification. All "verified" pin → net pairs below are from BoardViewer.exe screenshots supplied by the issue reporter, cross-checked by the project owner.</p>
@@ -827,13 +895,41 @@ def chip_pin_to_net(chip, A, B, layer, nets, pad_index):
   <li><strong>Verified pin → net:</strong> pin 1 = USBCOMP (same net as U58.148 — confirms cross-component net continuity through the spatial index)</li>
 </ul>
 
+<h4>JKBL1 — Keyboard backlight FFC connector</h4>
+<ul>
+  <li>Layer: TOP, rotation: 180°, chip_class: 17 (connector)</li>
+  <li>fp_id: 92 → <code>HIGHS_FC5AF361-1151H_36P-T</code></li>
+  <li>38 pins (36 along main row at master B=−8169, 2 mounting tabs at master B=+8169)</li>
+  <li><strong>Verified pin → net (all 38 pins resolved on current parser):</strong>
+    <ul>
+      <li>pin 1 = SENSE3, pin 2 = SENSE7, pin 3 = SENSE6, pin 4 = DRV14</li>
+      <li>pin 30 = GND, pin 33 = TP4LEFT, pin 35 = TP4MIDDLE, pin 36 = KBD_ID</li>
+      <li>pin 38 = GND (mounting tab; previously missing under the old <code>_extract_master_pins</code> off-by-one bug)</li>
+    </ul>
+  </li>
+</ul>
+
+<h4>JTAG2 — EC debug header</h4>
+<ul>
+  <li>Layer: BOTTOM, rotation: 0°, chip_class: 17 (connector)</li>
+  <li>fp_id: 28 → <code>HIGHS_WS32061-S0471-HF_6P-T</code></li>
+  <li>8 pins (6 signal pins + 2 alignment-tab GND mounting pins)</li>
+  <li><strong>Verified pin → net (all 8 pins resolved on current parser):</strong>
+    <ul>
+      <li>pin 1 = EC_JTAG_TMS, pin 2 = EC_JTAG_TDI, pin 3 = EC_JTAG_TDO, pin 4 = EC_JTAG_TCK</li>
+      <li>pin 5 = GND, pin 6 = VCC3M, pin 7 = GND, pin 8 = GND</li>
+    </ul>
+  </li>
+  <li>JTAG2 was the canary that exposed the missing pad records in the 0x008d8000..0x00914012 gap — its 8 pin pads use the +2=0x05 pad-shape enum (BGA-style annular ring), which the old 3-zero prefix filter rejected.</li>
+</ul>
+
 <h4>JDDR1 — DDR4 socket</h4>
 <ul>
-  <li>Layer: BOTTOM</li>
+  <li>Layer: BOTTOM, rotation: 180°, chip_class: 17 (connector)</li>
   <li>Through-hole connector — pads appear in all 10 copper layer regions</li>
 </ul>
 
-<p class="meta"><strong>Overall verification posture (T480, current parser):</strong> 9/9 supervised pin → net pairs match. 2,754 chips placed (1,664 TOP / 1,090 BOTTOM). 2,566 unique nets populated. 7,149 (refdes, pin) entries inserted into <code>model.signals</code>. Gigabyte and other formats retain bit-exact regression baseline.</p>
+<p class="meta"><strong>Overall verification posture (T480, current parser):</strong> <strong>19/19 supervised pin → net pairs match</strong> (up from 9/9 before the chip_class / connector / pad-shape work landed). 2,754 chips placed (1,664 TOP / 1,090 BOTTOM). <strong>2,717 unique nets populated, 10,203 (refdes, pin) entries</strong> in <code>model.signals</code> (was 2,566 / 7,149). Gigabyte and other formats retain bit-exact regression baseline.</p>
 
 <h2 id="sources">17. Sources and credit <a class="anchor-link" href="#sources">#</a></h2>
 

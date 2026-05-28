@@ -126,6 +126,14 @@ class _Chip:
     f3: int             # bbox-anchor X
     rot: int            # rotation (0 / 90 / 180 / 270)
     fp_id: int          # footprint ID, maps to master at fp_id - 1
+    # uint32 at after-Pascal +32..+35. Encodes a chip-type enum used
+    # by the file format to discriminate pin-layout conventions. Known
+    # values on T480: 0=IC/BGA, 1=LED/Diode, 2=MOSFET, 3=Resistor,
+    # 5=Capacitor, 9=Test jack, 13=Fuse, 14=Inductor, 15=Crystal,
+    # 16=Switch, 17=Connector, 18=Test point, 29=Fiducial. Currently
+    # only class==17 needs a non-canonical pin transform (the others
+    # all resolve correctly with the canonical rule).
+    chip_class: int
     # Packed Pascal-string slots starting at after-Pascal +45 (after the
     # 0x01 sentinel at +44). 100 % of T480 chips carry all 5; the agent
     # report calls these "device value / tolerance / tolerance-dup /
@@ -225,20 +233,33 @@ def _extract_master_pins(data: bytes, body_start: int, body_end: int
     if not sentinels:
         return []
     pins: List[Tuple[int, int]] = []
-    for i in range(len(sentinels) - 1):
-        s_off = sentinels[i]
-        nxt = sentinels[i + 1]
-        if nxt - s_off != 19:
-            continue
-        # 19-byte record layout (from sentinel start):
-        #   +0..+3   sentinel `ff ff ff ff`
-        #   +4..+7   uint32 pad_shape_enum (indexes Section B)
-        #   +8..+11  int32 A (local X)
-        #   +12..+15 int32 B (local Y)
-        #   +16..+18 3 zero padding bytes
-        A = int.from_bytes(data[s_off+8:s_off+12], "little", signed=True)
-        B = int.from_bytes(data[s_off+12:s_off+16], "little", signed=True)
-        pins.append((A, B))
+    # Find runs of consecutive 19-spaced sentinels — each run is Section
+    # C of one master. A K-pin master has K sentinels at offsets 0, 19,
+    # 38, ..., 19*(K-1) from section start. The earlier pair-up loop
+    # `for i in range(len(sentinels)-1)` emitted only K-1 records per
+    # run (fence-post: K sentinels = K-1 pairs); we now emit ALL
+    # sentinels in any run of length >= 2. Verified to give 2702/2754
+    # exact match against chip-side pin counts on T480 (remaining 52
+    # are test-point masters whose Section C is genuinely empty by
+    # construction).
+    i = 0
+    while i < len(sentinels):
+        run_start = i
+        while i + 1 < len(sentinels) and sentinels[i + 1] - sentinels[i] == 19:
+            i += 1
+        if i - run_start + 1 >= 2:
+            for j in range(run_start, i + 1):
+                s_off = sentinels[j]
+                # 19-byte record layout (from sentinel start):
+                #   +0..+3   sentinel `ff ff ff ff`
+                #   +4..+7   uint32 pad_shape_enum (indexes Section B)
+                #   +8..+11  int32 A (local X)
+                #   +12..+15 int32 B (local Y)
+                #   +16..+18 3 zero padding bytes
+                A = int.from_bytes(data[s_off+8:s_off+12], "little", signed=True)
+                B = int.from_bytes(data[s_off+12:s_off+16], "little", signed=True)
+                pins.append((A, B))
+        i += 1
     return pins
 
 
@@ -392,6 +413,10 @@ def _enumerate_r3_chips(
         f3 = int.from_bytes(data[p+20:p+24], "little", signed=True)
         rot = int.from_bytes(data[p+24:p+28], "little", signed=True)
         fp_id = int.from_bytes(data[p+28:p+32], "little", signed=True)
+        # uint32 chip_class at +32..+35. The 8 bytes at +36..+43 are
+        # still zero in 100% of T480 records — only +32..+35 carries
+        # the new field. See _Chip docstring for the enum values.
+        chip_class = int.from_bytes(data[p+32:p+36], "little")
         if abs(Y) > 2_000_000 or abs(X) > 2_000_000:
             i += 1
             continue
@@ -466,7 +491,7 @@ def _enumerate_r3_chips(
             chips[refdes] = _Chip(
                 refdes=refdes, record_off=i + 4,
                 Y=Y, X=X, f0=f0, f1=f1, f2=f2, f3=f3,
-                rot=rot, fp_id=fp_id,
+                rot=rot, fp_id=fp_id, chip_class=chip_class,
                 device_value=device_value, tolerance=tolerance,
                 part_code=part_code, pins=pin_records,
             )
@@ -519,7 +544,10 @@ def _pin_local_to_world(
 
     See TVW_FORMAT.html section 11 for the derivation. Verified on
     216 supervised chips across all 4 rotations × both layers with
-    residual = 0 against actual pad world coords.
+    residual = 0 against actual pad world coords for non-connector
+    chips. Class-17 (connector) chips require the additional negation
+    step below, verified on JKBL1 (38/38 pins), JTAG2 (8/8 pins),
+    plus pin-1 spot-checks on JLAN1, JDOCK1, JHDMI1, JUSBC1 and J41.
     """
     rot = chip.rot
     if   rot ==   0: dy, dx = -A, -B
@@ -527,6 +555,20 @@ def _pin_local_to_world(
     elif rot == 180: dy, dx =  A,  B
     elif rot == 270: dy, dx =  B, -A
     else:            dy, dx =  A,  B  # unusual rotation, accept verbatim
+    if chip.chip_class == 17:
+        # Connector pin frame matches canonical only for the two
+        # "natural" cases: rot ∈ {0, 180} on BOTTOM. In all other
+        # placements (TOP-side, or rotated 90°/270° on BOTTOM) the
+        # frame is inverted and we negate (dy, dx) BEFORE the BOTTOM
+        # dx-flip. Empirically verified:
+        #   rot=0   BOTTOM   no-negate  (JTAG2, JSIM1, JWLAN1, JFAN1)
+        #   rot=180 BOTTOM   no-negate  (JLCD1, JPWR1, JDDR1, JDDR2)
+        #   rot=0   TOP      negate     (JTP1)
+        #   rot=180 TOP      negate     (JKBL1, J41)
+        #   rot=90  BOTTOM   negate     (JLAN1, JSD1, JUSB1, JHDMI1)
+        #   rot=270 BOTTOM   negate     (JDOCK1, JUSBC1, JHP1, JSPK1)
+        if not (rot in (0, 180) and layer == "BOTTOM"):
+            dy, dx = -dy, -dx
     if layer == "BOTTOM":
         dx = -dx
     return (chip.f2 + dy, chip.f3 + dx)
@@ -618,32 +660,38 @@ def _build_pad_index(data: bytes) -> Dict[Tuple[int, int], int]:
     ``{(world_Y, world_X) -> net_id}``.
 
     Layer pad record (per agent-confirmed Compal layout):
-        +0..+2   3 zero bytes  (prefix sentinel)
+        +0..+1   2 zero bytes  (record sentinel)
+        +2       1 byte         pad-shape enum (0=plain SMD, 1=variant,
+                                2=through-hole/via, 5=BGA annular ring,
+                                8=press-fit / mounting tab)
         +3..+6   uint32 net_id  (< 4000)
-        +7..+10  uint32 pad_type (< 100000)
+        +7..+10  uint32 pad_type (>= 1, < 100000)
         +11..+14 int32  Y world
         +15..+18 int32  X world
 
+    Earlier drafts required 3 zero bytes at +0..+2 (treating the
+    pad-shape byte as part of the sentinel). That hid 11,175 unique
+    pad coords — primarily connector through-holes, BGA-style pads
+    with annular rings, and press-fit mounting tabs — concentrated
+    in the 0x008d8000..0x00914012 region (the gap between GND1 end
+    and BOTTOM trace start). Without those, all class-17 connectors
+    (JKBL1, JTAG2, JDOCK1, ...) returned empty pin → net mappings.
+
     Pads appear in every layer the net touches (1..10 per pin), all
     sharing the same `(Y, X)`. We dedup by coord, keeping the first
-    seen net_id (they're consistent across layers for valid files).
-
-    Note: same XY can resolve to multiple net_ids in pathological
-    cases (rare, never observed on T480 ground-truth set). When that
-    happens this index returns the first one — a 0.x % mis-attribution
-    risk that's acceptable for the MVP. A future refinement would
-    layer-scope the lookup.
+    seen net_id. The byte-aligned advance (`i += 1` after a match)
+    is required because the dense gap-region records don't sit on a
+    stride-19 grid relative to file position 0 — stride-19 advance
+    happened to work historically only because of zero-padded slack
+    between the early layer regions.
     """
     index: Dict[Tuple[int, int], int] = {}
     i = 0
     n = len(data) - 19
     while i < n:
-        # Cheapest pre-check: 3 zero bytes at +0..+2. ~half the file
+        # Cheapest pre-check: 2 zero bytes at +0..+1. ~half the file
         # bytes are non-zero so this skips most positions quickly.
-        if data[i] != 0:
-            i += 1
-            continue
-        if data[i+1] != 0 or data[i+2] != 0:
+        if data[i] != 0 or data[i+1] != 0:
             i += 1
             continue
         net_id = int.from_bytes(data[i+3:i+7], "little")
@@ -651,7 +699,12 @@ def _build_pad_index(data: bytes) -> Dict[Tuple[int, int], int]:
             i += 1
             continue
         pad_type = int.from_bytes(data[i+7:i+11], "little")
-        if pad_type >= 100000:
+        # pad_type==0 is the most common false-positive at this stage
+        # (zero-padded alignment slack between regions). Real pad_types
+        # start at 1 and stay below ~280 in the per-layer aperture
+        # table; the 100k cap admits all-the-way-to-master-pad-shape
+        # references (which can go higher) while rejecting random ints.
+        if pad_type == 0 or pad_type >= 100000:
             i += 1
             continue
         Y = int.from_bytes(data[i+11:i+15], "little", signed=True)
@@ -662,7 +715,8 @@ def _build_pad_index(data: bytes) -> Dict[Tuple[int, int], int]:
         key = (Y, X)
         if key not in index:
             index[key] = net_id
-        i += 19
+        # Byte-aligned advance — see docstring.
+        i += 1
     return index
 
 
