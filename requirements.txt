@@ -6,8 +6,12 @@
 #   GPU tier (sub-10ms frames):  pyopengltk + PyOpenGL + skia-python + numpy
 #   CPU tier (~30-50 ms frames): skia-python + numpy
 #   Fallback:                    plain tk.Canvas (slow on dense trace layers)
+#
+# tkinterdnd2 is also optional — it enables drag-drop of boardview files
+# onto the canvas. Without it the menu / Ctrl+O picker still works.
 
 numpy>=1.24
 skia-python>=87.6
 pyopengltk>=0.0.4
 PyOpenGL>=3.1
+tkinterdnd2>=0.4

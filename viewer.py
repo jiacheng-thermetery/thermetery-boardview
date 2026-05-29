@@ -39,6 +39,91 @@ from tkinter import filedialog, messagebox, ttk
 from boardview import BoardModel, Component, parse as parse_board, is_stub_format
 
 
+def _check_native_dlls() -> None:
+    """Probe the three native DLLs that accelerate boardview parsing
+    and warn the user (to stderr) if any are missing.
+
+    Without these the cold-load times balloon dramatically:
+      * tvw_native.dll - TVW pad/poly/net scanners (+1-2 s on each .tvw)
+      * xzz_native.dll - XZZPCB DES decryption  (+30-60 s on each .pcb)
+      * rc6_native.dll - ASUS .fz RC6 decryption (+6 s on each ASUS .fz;
+                         ASRock .fz is unaffected -- it only uses zlib)
+
+    Viewer still runs without them -- this is a perf warning, not an
+    error. Useful when shipping the viewer to a colleague and forgetting
+    to bundle the compiled DLLs alongside the .py files.
+
+    ASCII-only messages so they render on cp1252 / cp437 consoles."""
+    import sys
+
+    missing: List[Tuple[str, str, str]] = []  # (name, slowdown, build hint)
+
+    # tvw_native -- exposes _load() returning the lib (or None on miss).
+    try:
+        from tvw_native import _load as _load_tvw
+        if _load_tvw() is None:
+            missing.append((
+                "tvw_native.dll",
+                "+1-2 s per .tvw cold load (slower pad/net/poly scans)",
+                "compile tvw_native.c (see header comment for the gcc line)",
+            ))
+    except Exception:
+        missing.append((
+            "tvw_native.dll",
+            "+1-2 s per .tvw cold load",
+            "compile tvw_native.c (see header comment for the gcc line)",
+        ))
+
+    # xzz_native -- has a clean public available() helper.
+    try:
+        import xzz_native
+        if not xzz_native.available():
+            missing.append((
+                "xzz_native.dll",
+                "+30-60 s per .pcb (XZZPCB) cold load: DES in pure Python",
+                "run boardviewer/build_xzz_native.bat",
+            ))
+    except Exception:
+        missing.append((
+            "xzz_native.dll",
+            "+30-60 s per .pcb (XZZPCB) cold load",
+            "run boardviewer/build_xzz_native.bat",
+        ))
+
+    # rc6_native -- private helper inside fz_parser.py. Only matters for
+    # ASUS .fz; ASRock .fz files don't need RC6 at all.
+    try:
+        from fz_parser import _load_native_rc6
+        if _load_native_rc6() is None:
+            missing.append((
+                "rc6_native.dll",
+                "+6 s per ASUS .fz cold load (ASRock .fz unaffected)",
+                "compile rc6_native.c (see header comment for the gcc line)",
+            ))
+    except Exception:
+        missing.append((
+            "rc6_native.dll",
+            "+6 s per ASUS .fz cold load",
+            "compile rc6_native.c (see header comment for the gcc line)",
+        ))
+
+    if not missing:
+        return
+    print(
+        "[viewer] WARNING: one or more native DLLs are missing -- cold "
+        "loads will be much slower:",
+        file=sys.stderr,
+    )
+    for name, slowdown, hint in missing:
+        print(f"  - {name}: {slowdown}", file=sys.stderr)
+        print(f"      build: {hint}", file=sys.stderr)
+    print(
+        "[viewer] These DLLs live next to the matching .py wrappers. "
+        "Viewer will still run -- this is a perf warning, not an error.",
+        file=sys.stderr,
+    )
+
+
 def _surface_model_warnings(model: BoardModel, parent=None) -> None:
     """If the parser flagged anything on `model.warnings`, show it to
     the user as a single modal popup. Silent for parsers that don't
@@ -335,6 +420,27 @@ class BoardCanvasCPU(tk.Canvas):
         self._skia_buf = None  # numpy.ndarray (H, W, 4) RGBA, lazy
         self._skia_surface = None
         self._skia_photo = None
+        # Pending-redraw flag — coalesces bursty events (drag motion at
+        # ~150 Hz, configure storms on resize) into a single actual paint
+        # via after_idle. The GL canvas has the same machinery; the CPU
+        # canvas was previously calling _redraw() synchronously on every
+        # motion event, which cratered drag responsiveness on slow rigs.
+        self._redraw_pending = False
+        # Selected-net geometry cache. geometry_on_net does an O(N)
+        # numpy mask over every trace segment to find the matching ones;
+        # repeating that 60×/sec for the same net while the user is
+        # panning/zooming is pure waste. Cache the (segs, polys) tuple
+        # and recompute only when sel_net_id changes. Invalidated in
+        # set_board (new topology). Net changes auto-invalidate via
+        # the key (sel_net_id) being part of the cache tuple.
+        self._geometry_net_cache: Tuple[
+            Optional[int], Tuple[List[Any], List[Any]]
+        ] = (None, ([], []))
+        # Per-layer component count cache. Used in the status-bar text
+        # ("N components on this layer") which the previous code
+        # recomputed via sum(1 for ...) on every redraw — small but
+        # measurable at drag-pan rates on big boards.
+        self._comp_count_by_layer: Dict[str, int] = {}
         self._compute_bounds()
         self._area_cache: Dict[str, float] = {}
         self._sorted_components: List[Component] = []
@@ -528,7 +634,31 @@ class BoardCanvasCPU(tk.Canvas):
             try:
                 self.config(cursor="watch")
                 self.update_idletasks()
-                _ = self.board.topology
+                topo = self.board.topology
+                # Eagerly warm the SpatialHash on a background thread so
+                # the user's first net click doesn't stall ~200 ms on a
+                # Z490. The native build path defers the spatial-hash
+                # to "first net_at()", which lands inside the click.
+                #
+                # Safety: _ensure_spatial builds into a private local
+                # SpatialHash and publishes it with one atomic pointer
+                # store (self._spatial = sh). Readers (net_at) use the
+                # returned local and never re-read self._spatial;
+                # geometry_on_net never touches _spatial at all. The
+                # frozen _node_xy / _node_layer inputs make the build
+                # deterministic, so if this thread and a concurrent
+                # net_at() both see _spatial is None they each build an
+                # equivalent hash and one is harmlessly discarded — a
+                # wasted ~200 ms rebuild, never corruption. (On a
+                # free-threaded / no-GIL interpreter the publish/read is
+                # a formal data race, but the worst case stays "wasted
+                # rebuild", not a torn or partial structure.)
+                ensure_spatial = getattr(topo, "_ensure_spatial", None)
+                if ensure_spatial is not None:
+                    threading.Thread(
+                        target=ensure_spatial, daemon=True,
+                        name="topology-spatial-warmup",
+                    ).start()
             finally:
                 self.config(cursor="")
         self._redraw()
@@ -544,6 +674,13 @@ class BoardCanvasCPU(tk.Canvas):
         self._show_traces = False
         self._area_cache = {}
         self._sorted_components = []
+        # New board → new topology object → drop the geometry-on-net
+        # cache. Failing to do this would risk serving stale segments
+        # if the new board reuses a net_id from the old.
+        self._geometry_net_cache = (None, ([], []))
+        # And the per-layer count cache — keyed off the old board's
+        # components — so the status bar reflects the new one.
+        self._comp_count_by_layer = {}
         self._compute_bounds()
         self._reorder_components()
         self.zoom = 1.0
@@ -828,8 +965,14 @@ class BoardCanvasCPU(tk.Canvas):
                 f"{self._view_layer} (inner copper, ghost components)"
             )
         else:
-            n_layer = sum(1 for c in self.board.components.values()
-                          if c.layer == self._view_layer)
+            # Lazily fill the per-layer count cache. Cached forever
+            # within a single board (components don't change layer at
+            # runtime). Cleared in set_board.
+            n_layer = self._comp_count_by_layer.get(self._view_layer)
+            if n_layer is None:
+                n_layer = sum(1 for c in self.board.components.values()
+                              if c.layer == self._view_layer)
+                self._comp_count_by_layer[self._view_layer] = n_layer
             layer_indicator = ("TOP (looking down)"
                                if self._view_layer == "TOP"
                                else "BOTTOM (mirrored, as if board flipped)")
@@ -1147,10 +1290,15 @@ class BoardCanvasCPU(tk.Canvas):
         # synthetic ratsnest, dashed cross-layer edges keep their dash
         # style even when highlighted.
         if sel_net_id is not None:
-            try:
-                segs, polys = topo.geometry_on_net(sel_net_id)
-            except Exception:
-                segs, polys = [], []
+            cached_id, cached_geom = self._geometry_net_cache
+            if cached_id == sel_net_id:
+                segs, polys = cached_geom
+            else:
+                try:
+                    segs, polys = topo.geometry_on_net(sel_net_id)
+                except Exception:
+                    segs, polys = [], []
+                self._geometry_net_cache = (sel_net_id, (segs, polys))
 
             # Cache one Paint per (layer, role, dashed) — the loop below
             # would otherwise allocate a Paint per segment.
@@ -1296,10 +1444,15 @@ class BoardCanvasCPU(tk.Canvas):
                     self.create_line(p0x, p0y, p1x, p1y,
                                      fill=dimmed_color, width=1)
         if sel_net_id is not None:
-            try:
-                segs, polys = topo.geometry_on_net(sel_net_id)
-            except Exception:
-                segs, polys = [], []
+            cached_id, cached_geom = self._geometry_net_cache
+            if cached_id == sel_net_id:
+                segs, polys = cached_geom
+            else:
+                try:
+                    segs, polys = topo.geometry_on_net(sel_net_id)
+                except Exception:
+                    segs, polys = [], []
+                self._geometry_net_cache = (sel_net_id, (segs, polys))
 
             # Cross-layer highlight: current layer = TRACE_HIGHLIGHT,
             # off-current layers = bright palette color for that layer.
@@ -1426,6 +1579,21 @@ class BoardCanvasCPU(tk.Canvas):
             self._has_dragged = True
         self.pan_x = p0x + dx
         self.pan_y = p0y + dy
+        # Coalesced redraw — bursts of motion events collapse into a
+        # single repaint per Tk idle slice. Synchronous _redraw() here
+        # was the biggest single source of pan lag on weaker rigs.
+        self._schedule_redraw()
+
+    def _schedule_redraw(self) -> None:
+        """Coalesce multiple state-change calls in the same Tk event into
+        a single repaint. Mirrors BoardCanvasGL._schedule_redraw."""
+        if self._redraw_pending:
+            return
+        self._redraw_pending = True
+        self.after_idle(self._do_coalesced_redraw)
+
+    def _do_coalesced_redraw(self) -> None:
+        self._redraw_pending = False
         self._redraw()
 
     def _on_release(self, event: tk.Event) -> None:
@@ -1769,6 +1937,18 @@ if _GL_AVAILABLE:
             # (multiple <Configure> + <Expose> at startup) into a single
             # actual GL draw call via after_idle.
             self._redraw_scheduled = False
+            # Selected-net geometry cache (mirrors BoardCanvasCPU). See
+            # that class for cache invariants. Even on a GPU-backed
+            # render, geometry_on_net itself runs on the CPU — caching
+            # the (segs, polys) tuple skips a numpy mask + list-of-segs
+            # rebuild every frame.
+            self._geometry_net_cache: Tuple[
+                Optional[int], Tuple[List[Any], List[Any]]
+            ] = (None, ([], []))
+            # Per-layer component count cache (mirrors BoardCanvasCPU).
+            # The status bar reads this once per frame; previous code
+            # ran a sum() over every component each redraw.
+            self._comp_count_by_layer: Dict[str, int] = {}
 
             self._compute_bounds()
             self._area_cache: Dict[str, float] = {}
@@ -1842,7 +2022,16 @@ if _GL_AVAILABLE:
                 try:
                     self.config(cursor="watch")
                     self.update_idletasks()
-                    _ = self.board.topology
+                    topo = self.board.topology
+                    # Background SpatialHash warmup — see the matching
+                    # block in BoardCanvasCPU.toggle_traces for the
+                    # rationale and the race-safety argument.
+                    ensure_spatial = getattr(topo, "_ensure_spatial", None)
+                    if ensure_spatial is not None:
+                        threading.Thread(
+                            target=ensure_spatial, daemon=True,
+                            name="topology-spatial-warmup",
+                        ).start()
                 finally:
                     self.config(cursor="")
             self._schedule_redraw()
@@ -1858,6 +2047,11 @@ if _GL_AVAILABLE:
             self._show_traces = False
             self._area_cache = {}
             self._sorted_components = []
+            # New topology object → drop the geometry-on-net cache. See
+            # the BoardCanvasCPU.set_board comment for the rationale.
+            self._geometry_net_cache = (None, ([], []))
+            # And the per-layer component count cache, same reason.
+            self._comp_count_by_layer = {}
             self._compute_bounds()
             self._reorder_components()
             self.zoom = 1.0
@@ -3264,10 +3458,15 @@ if _GL_AVAILABLE:
             # (UF unions in tvw_topology.py); we just stop filtering by
             # layer here and group by layer for color-coding.
             if sel_net_id is not None:
-                try:
-                    segs, polys = topo.geometry_on_net(sel_net_id)
-                except Exception:
-                    segs, polys = [], []
+                cached_id, cached_geom = self._geometry_net_cache
+                if cached_id == sel_net_id:
+                    segs, polys = cached_geom
+                else:
+                    try:
+                        segs, polys = topo.geometry_on_net(sel_net_id)
+                    except Exception:
+                        segs, polys = [], []
+                    self._geometry_net_cache = (sel_net_id, (segs, polys))
 
                 # Group segments by (layer, dashed). One drawPath per
                 # bucket keeps batching efficient — ~1 paint+drawPath
@@ -3492,10 +3691,15 @@ if _GL_AVAILABLE:
                 )
                 comp_label = "ghost components"
             else:
-                n_layer = sum(
-                    1 for c in self.board.components.values()
-                    if c.layer == self._view_layer
-                )
+                # Lazily fill the per-layer count cache. See the matching
+                # block in BoardCanvasCPU._redraw for the rationale.
+                n_layer = self._comp_count_by_layer.get(self._view_layer)
+                if n_layer is None:
+                    n_layer = sum(
+                        1 for c in self.board.components.values()
+                        if c.layer == self._view_layer
+                    )
+                    self._comp_count_by_layer[self._view_layer] = n_layer
                 layer_indicator = (
                     "TOP (looking down)" if self._view_layer == "TOP"
                     else "BOTTOM (mirrored, as if board flipped)"
@@ -4621,6 +4825,78 @@ class ViewerApp(tk.Tk):
         self._rebuild_recent_menu()
         self._update_status()
 
+        # Drag-drop wiring goes last so all targets exist. Failure to
+        # set up DnD (e.g. tkinterdnd2 not installed) is non-fatal —
+        # the user keeps the menu workflow.
+        self._setup_drag_and_drop()
+
+    # Boardview extensions accepted by `parse_board()`. Single source of
+    # truth shared between the menu picker and the drop handler.
+    BOARD_EXTS = (".cad", ".brd", ".brd2", ".bv", ".tvw", ".fz", ".pcb")
+
+    def _setup_drag_and_drop(self) -> None:
+        """Activate tkinterdnd2 on the existing Tk root and register a
+        drop target on the board canvas.
+
+        Optional dependency: a colleague who hasn't run
+        `pip install tkinterdnd2` still gets a working viewer, just
+        without the drop affordance. The hint goes to stderr (visible
+        on CLI launches) so it doesn't spam a popup."""
+        try:
+            from tkinterdnd2 import TkinterDnD, DND_FILES
+        except ImportError:
+            import sys
+            print(
+                "[viewer] tkinterdnd2 not installed -- drag/drop disabled. "
+                "Install with: pip install tkinterdnd2",
+                file=sys.stderr,
+            )
+            return
+        try:
+            # Activates the tkdnd Tcl extension on the existing Tk
+            # interpreter. Pass the WIDGET (self), not self.tk — the
+            # _require helper indexes off widget.tk internally.
+            TkinterDnD._require(self)
+        except Exception as exc:
+            import sys
+            print(
+                f"[viewer] tkdnd activation failed -- drag/drop disabled "
+                f"({exc.__class__.__name__}: {exc})",
+                file=sys.stderr,
+            )
+            return
+        self.canvas.drop_target_register(DND_FILES)
+        self.canvas.dnd_bind("<<Drop>>", self._on_board_drop)
+
+    def _parse_drop_data(self, data: str) -> List[Path]:
+        """Convert raw `event.data` (a Tcl-list-encoded string of paths)
+        into Path objects. tkdnd brace-quotes paths with spaces; using
+        tk.splitlist handles that correctly where naive `.split()`
+        would corrupt them."""
+        try:
+            raw = self.tk.splitlist(data)
+        except Exception:
+            raw = data.split()
+        return [Path(p) for p in raw]
+
+    def _on_board_drop(self, event) -> None:
+        """Drop handler for the board canvas. Picks the first dropped
+        file whose extension is a known boardview format. Wrong-type
+        drops show a friendly hint instead of silently failing."""
+        paths = self._parse_drop_data(event.data)
+        match = next(
+            (p for p in paths if p.suffix.lower() in self.BOARD_EXTS),
+            None,
+        )
+        if match is None:
+            messagebox.showinfo(
+                "Not a boardview",
+                "Drop a boardview file here. Supported extensions:\n\n  "
+                + "  ".join(self.BOARD_EXTS),
+            )
+            return
+        self._open_board_path(match)
+
     @staticmethod
     def _title_for(path: Optional[Path]) -> str:
         if path:
@@ -5098,6 +5374,11 @@ class ViewerApp(tk.Tk):
 
 
 def main() -> None:
+    # Print a one-time perf warning if any of the native DLLs are missing.
+    # Cheap (a couple of LoadLibrary attempts) and visible *before* the
+    # user opens a board, so they can decide whether to wait or rebuild.
+    _check_native_dlls()
+
     ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
     ap.add_argument("board", nargs="?",
                     help="Path to a boardview file (.cad/.brd/.brd2/.bv/.tvw/.fz/.pcb). "
