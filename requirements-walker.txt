@@ -1,0 +1,19 @@
+# Experimental repair-walker extras (work in progress).
+#
+# The walker (walker.py) is an early-stage diagnostic tool layered on top
+# of the viewer's parser/renderer core. It is NOT the focus of this repo
+# and is expected to have rough edges — see the README. Install these
+# only if you want to try it.
+#
+#   pip install -r requirements-walker.txt
+#
+# Pulls in the viewer baseline first, then the walker-only dependencies.
+
+-r requirements.txt
+
+PyYAML>=6.0        # rules YAML
+openpyxl>=3.1      # convert_rules.py / inspect_xlsx.py (.xlsx rules import)
+pymupdf>=1.23      # schematic_text.py (schematic-PDF signal indexing)
+anthropic>=0.50    # chat panel (Claude backend)
+openai>=1.50       # chat panel (OpenAI backend)
+keyring>=24        # store API keys in the OS keyring
