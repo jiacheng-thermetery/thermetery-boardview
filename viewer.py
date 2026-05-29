@@ -34,9 +34,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from boardview import BoardModel, Component, parse as parse_board, is_stub_format
+from boardview import BoardModel, Component, parse as parse_board, is_stub_format, FZKeyError
 
 
 def _check_native_dlls() -> None:
@@ -5114,13 +5114,25 @@ class ViewerApp(tk.Tk):
             return
         self._open_board_path(Path(path))
 
-    def _open_board_path(self, path: Path) -> None:
+    def _open_board_path(self, path: Path, key=None) -> None:
         try:
-            board = parse_board(path)
+            board = parse_board(path, key=key)
+        except FZKeyError as exc:
+            # ASUS (RC6) .fz with a missing or bad key - prompt and retry.
+            board = self._load_with_key_prompt(path, fmt="fz",
+                                               initial_error=exc)
+            if board is None:
+                return
         except Exception as exc:
             messagebox.showerror("Could not load boardview",
                                  f"{path}\n\n{exc}")
             return
+        # XZZPCB loads even without a key, but only the cleartext sections.
+        # Offer to supply one so the encrypted part/pin records come in too.
+        if getattr(board, "key_required", False):
+            better = self._load_with_key_prompt(path, fmt="xzz")
+            if better is not None:
+                board = better
         _remember_dir(path)
         _add_recent(path)
         self.board = board
@@ -5135,6 +5147,79 @@ class ViewerApp(tk.Tk):
         self.net_search.clear()
         self._rebuild_recent_menu()
         self._update_status()
+
+    def _load_with_key_prompt(self, path: Path, *, fmt: str,
+                              initial_error=None):
+        """Prompt for a decryption key and re-parse `path` with it. Returns a
+        BoardModel on success, or None if the user cancels or gives up.
+        `fmt` is "fz" (ASUS, 44 hex words) or "xzz" (16 hex digits)."""
+        nl = chr(10)
+        if fmt == "fz":
+            title = "ASUS FZ key required"
+            ask = (f"{path.name} is an RC6-encrypted ASUS .fz file and no key "
+                   f"was found (private/fz_key.txt or the FZ_KEY env var)."
+                   + nl + nl + "Paste the FZKey (44 x 32-bit hex words):")
+        else:
+            title = "XZZ key required"
+            ask = (f"{path.name} is DES-encrypted and no valid key was found "
+                   f"(private/XZZ_Key.txt or the XZZPCB_KEY env var)."
+                   + nl + nl + "Paste the XZZ key (16 hex digits):")
+        prompt = (str(initial_error) + nl + nl + ask
+                  if initial_error is not None else ask)
+        for _ in range(3):
+            entered = simpledialog.askstring(title, prompt, parent=self)
+            if not entered or not entered.strip():
+                return None
+            entered = entered.strip()
+            try:
+                board = parse_board(path, key=entered)
+            except FZKeyError as exc:
+                prompt = f"That key did not work - {exc}" + nl + nl + ask
+                continue
+            except Exception as exc:
+                messagebox.showerror("Could not load boardview",
+                                     f"{path}{nl}{nl}{exc}", parent=self)
+                return None
+            if getattr(board, "key_required", False):
+                # XZZ: the key parsed but failed its parity check.
+                prompt = ("That key did not validate (parity check failed)."
+                          + nl + nl + ask)
+                continue
+            self._maybe_save_key(fmt, entered)
+            return board
+        messagebox.showwarning(
+            title,
+            ("Giving up after several attempts - the board cannot open "
+             "without a valid key.") if fmt == "fz" else
+            ("Giving up after several attempts - opening without the "
+             "encrypted records."),
+            parent=self)
+        return None
+
+    def _maybe_save_key(self, fmt: str, entered: str) -> None:
+        """Offer to persist a working key to private/ so the user is not asked
+        again. Opt-in; declining keeps the key for this session only."""
+        nl = chr(10)
+        fname = "fz_key.txt" if fmt == "fz" else "XZZ_Key.txt"
+        if not messagebox.askyesno(
+                "Remember this key?",
+                f"The key worked. Save it to private/{fname} so you are not "
+                f"asked again?" + nl + nl
+                + "(private/ is gitignored - it will not be committed.)",
+                parent=self):
+            return
+        try:
+            priv = Path("private")
+            priv.mkdir(exist_ok=True)
+            (priv / fname).write_text(entered + nl, encoding="utf-8")
+            messagebox.showinfo("Key saved",
+                                f"Saved to {(priv / fname).resolve()}",
+                                parent=self)
+        except OSError as exc:
+            messagebox.showwarning(
+                "Could not save key",
+                f"{exc}" + nl + nl + "The key still works for this session.",
+                parent=self)
 
     # ----- search callbacks -------------------------------------------------
 
@@ -5385,6 +5470,11 @@ def main() -> None:
                          "If omitted you'll be prompted.")
     ap.add_argument("--smoke-test", action="store_true",
                     help="Initialize and exit (no mainloop)")
+    ap.add_argument("--key", default=None,
+                    help="Decryption key for an encrypted board when the "
+                         "private/ key file is missing: ASUS .fz wants 44 hex "
+                         "words, XZZ .pcb wants 16 hex digits. Also settable "
+                         "via the FZ_KEY / XZZPCB_KEY environment variables.")
     args = ap.parse_args()
 
     if args.board:
@@ -5410,7 +5500,14 @@ def main() -> None:
         board_path = Path(picked)
         _remember_dir(board_path)
 
-    board = parse_board(board_path)
+    try:
+        board = parse_board(board_path, key=args.key)
+    except FZKeyError as exc:
+        import sys
+        print(f"[viewer] {exc}", file=sys.stderr)
+        print("[viewer] Supply it with --key, set FZ_KEY in the environment, "
+              "or open the file from the GUI to be prompted.", file=sys.stderr)
+        sys.exit(2)
 
     app = ViewerApp(board, board_path=board_path)
     if args.smoke_test:

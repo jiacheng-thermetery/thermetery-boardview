@@ -816,7 +816,7 @@ def _arc_to_segments(a0: int, a1: int, r: int, cx: int, cy: int,
 # Public API — produce a BoardModel
 # ============================================================================
 
-def parse(path: Path, key: Optional[int] = None) -> BoardModel:
+def parse(path: Path, key=None) -> BoardModel:
     """Parse an XZZPCB file into a BoardModel.
 
     Args:
@@ -830,6 +830,10 @@ def parse(path: Path, key: Optional[int] = None) -> BoardModel:
     strings) describing any non-fatal issues encountered while parsing.
     """
     raw = Path(path).read_bytes()
+    # A manually-supplied key may arrive as a hex string (from the UI / CLI
+    # / boardview.parse); normalise it to the 64-bit int _resolve_key wants.
+    if isinstance(key, str):
+        key = _parse_key_text(key)
     resolved_key = _resolve_key(key)
     parser = XZZPCBParser(raw, resolved_key)
 
@@ -840,6 +844,10 @@ def parse(path: Path, key: Optional[int] = None) -> BoardModel:
     # docstring above.
     model.warnings = list(parser.warnings)         # type: ignore[attr-defined]
     model.outline_segments = list(parser.outline)  # type: ignore[attr-defined]
+    # Structured signal for the UI: True when no valid key was in play, so
+    # the encrypted part/pin records were skipped and a key can be asked for.
+    model.key_required = parser.key is None        # type: ignore[attr-defined]
+    model.key_format = "xzz"                       # type: ignore[attr-defined]
 
     # ---- Components from parts (one Component + Shape per part) -----------
     for part in parser.parts:

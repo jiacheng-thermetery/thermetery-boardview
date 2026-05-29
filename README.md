@@ -30,6 +30,22 @@ macro layout, coordinate system, master-footprint pin-position decoder,
 the 38-byte pad records that carry the pin↔net mapping, and (from the
 Compal/Lenovo work) the chip-class enum and connector pin transform.
 
+### Encrypted formats — supplying a key
+
+ASUS `.fz` (RC6) and XZZPCB `.pcb` (DES) files are encrypted and need a key,
+which is not shipped. The default location is `private/fz_key.txt` (ASUS,
+44 hex words) / `private/XZZ_Key.txt` (XZZ, 16 hex digits). If that file is
+missing you can still supply the key:
+
+- **In the viewer** — opening such a board pops a dialog to paste the key,
+  then offers to save it to `private/` for next time (opt-in; `private/` is
+  gitignored).
+- **Environment** — set `FZ_KEY` or `XZZPCB_KEY`.
+- **CLI** — `python viewer.py board.fz --key "<key>"`.
+
+Without a key, XZZ boards still load their cleartext outline + test pads;
+an ASUS `.fz` cannot open at all (its whole body is encrypted).
+
 ## Install
 
 The viewer runs on stdlib + tkinter alone; the optional packages in

@@ -155,14 +155,25 @@ def _rc6_decode_native(source: bytearray, key: List[int]) -> bool:
 # Public API
 # --------------------------------------------------------------------------
 
-def parse(path: Path) -> BoardModel:
+class FZKeyError(ValueError):
+    """Raised when an ASUS (RC6-encrypted) FZ file needs a key that wasn't
+    supplied, or that failed the parity check. ``reason`` is ``"missing"``
+    or ``"invalid"`` so a UI can decide whether to prompt for a key or
+    report a bad one."""
+
+    def __init__(self, message: str, *, reason: str = "missing") -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+def parse(path: Path, key=None) -> BoardModel:
     """Parse a `.fz` boardview file into a BoardModel."""
     p = Path(path)
     buf = bytearray(p.read_bytes())
     if len(buf) < 12:
         raise ValueError(f"{p.name}: file too short for FZ format")
 
-    text = _decode_fz(buf, source_name=p.name, source_path=p)
+    text = _decode_fz(buf, source_name=p.name, source_path=p, key=key)
     return _parse_extracta(text)
 
 
@@ -171,7 +182,7 @@ def parse(path: Path) -> BoardModel:
 # --------------------------------------------------------------------------
 
 def _decode_fz(buf: bytearray, *, source_name: str,
-               source_path: Optional[Path] = None) -> str:
+               source_path: Optional[Path] = None, key=None) -> str:
     """Decode an FZ file's body into the Extracta text content.
     Description block is parsed but discarded (it's BoM-style metadata)."""
     # Skip the 4-byte uncompressed-size header. Detect whether the body
@@ -181,19 +192,21 @@ def _decode_fz(buf: bytearray, *, source_name: str,
                and buf[5] in (0x9C, 0xDA))
 
     if not is_zlib:
-        key = _load_fz_key()
+        key = _resolve_fz_key(key)
         if key is None:
-            raise ValueError(
+            raise FZKeyError(
                 f"{source_name}: ASUS-style FZ file (RC6-encrypted body). "
-                f"This needs an FZKey (44 × 32-bit hex words) at "
-                f"private/fz_key.txt. The key isn't included in this repo "
-                f"— supply your own."
+                f"This needs an FZKey (44 x 32-bit hex words). Supply one via "
+                f"private/fz_key.txt, the FZ_KEY environment variable, or the "
+                f"key= argument (the viewer prompts for it on open).",
+                reason="missing",
             )
         if not _validate_fz_key(key):
-            raise ValueError(
-                f"{source_name}: FZKey failed parity check. The 44 words "
+            raise FZKeyError(
+                f"{source_name}: FZKey failed parity check — the 44 words "
                 f"don't match OpenBoardView's expected parity array. "
-                f"Verify the key file content."
+                f"Verify the key.",
+                reason="invalid",
             )
 
         # Skip the 6+ second pure-Python RC6 if we've decoded this
@@ -302,6 +315,51 @@ def _cache_save(source_path: Optional[Path], *,
         pass
 
 
+def _parse_fz_key_text(text: str) -> Optional[List[int]]:
+    """Tokenize a textual FZKey into exactly 44 32-bit words, or return None
+    if the text doesn't yield 44 hex words. Forgiving: accepts 0x prefixes,
+    whitespace / comma / semicolon separators, and '#' line comments. Shared
+    by the key file, the FZ_KEY env var, and keys pasted into the viewer."""
+    words: List[int] = []
+    for raw in text.splitlines():
+        stripped = raw.split("#", 1)[0]
+        stripped = stripped.replace(",", " ").replace(";", " ")
+        for tok in stripped.split():
+            t = tok.strip()
+            if t.lower().startswith("0x"):
+                t = t[2:]
+            if not t:
+                continue
+            try:
+                words.append(int(t, 16) & 0xFFFFFFFF)
+            except ValueError:
+                continue
+    return words if len(words) == 44 else None
+
+
+def _resolve_fz_key(explicit=None) -> Optional[List[int]]:
+    """Resolve a 44-word FZKey from, in order: an explicit key (a list of 44
+    ints, or a string to tokenize), the FZ_KEY environment variable, then
+    private/fz_key.txt. Returns None if none yielded a 44-word key. Mirrors
+    xzzpcb_parser._resolve_key. Parity is NOT checked here -- the caller
+    validates, so it can distinguish 'missing' from 'invalid'."""
+    if explicit is not None:
+        if isinstance(explicit, str):
+            return _parse_fz_key_text(explicit)
+        # Otherwise assume an iterable of ints (already-parsed 44 words).
+        try:
+            words = [int(w) & 0xFFFFFFFF for w in explicit]
+        except (TypeError, ValueError):
+            return None
+        return words if len(words) == 44 else None
+    env = os.environ.get("FZ_KEY")
+    if env:
+        words = _parse_fz_key_text(env)
+        if words is not None:
+            return words
+    return _load_fz_key()
+
+
 def _load_fz_key() -> Optional[List[int]]:
     """Look for a 44-word FZKey configured locally. Returns None if not found.
 
@@ -319,22 +377,8 @@ def _load_fz_key() -> Optional[List[int]]:
     for p in candidates:
         if not p.exists():
             continue
-        words: List[int] = []
-        for raw in p.read_text().splitlines():
-            stripped = raw.split("#", 1)[0]
-            # Replace common separators with whitespace, then split.
-            stripped = stripped.replace(",", " ").replace(";", " ")
-            for tok in stripped.split():
-                t = tok.strip()
-                if t.lower().startswith("0x"):
-                    t = t[2:]
-                if not t:
-                    continue
-                try:
-                    words.append(int(t, 16) & 0xFFFFFFFF)
-                except ValueError:
-                    continue
-        if len(words) == 44:
+        words = _parse_fz_key_text(p.read_text())
+        if words is not None:
             return words
     return None
 
