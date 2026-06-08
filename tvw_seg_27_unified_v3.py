@@ -173,6 +173,13 @@ def find_segments_in_gap(buf, gap_start, gap_end, min_run=10, allow_zero_net=Tru
                 p += 24; cnt += 1
             if cnt >= min_run:
                 runs.append((run_start, p, cnt))
+            else:
+                # Short run: roll back to one byte past the run start so the
+                # scan re-tests bytes inside it and re-syncs onto the true
+                # 24-byte record grid. Without this, a phase-misaligned false
+                # short run at a gap head drops the real leading records.
+                # Mirrors tvw_native.c find_segments_in_gap (p = run_start + 1).
+                p = run_start + 1
         else:
             p += 1
     return runs
