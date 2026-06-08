@@ -132,6 +132,107 @@ def _scan_custom_headers(buf: bytes) -> List[Tuple[int, str]]:
     Inlined here (rather than importing from a `tvw_explore` diagnostic
     module) so this file stays self-contained for the boardviewer
     distribution.
+
+    Dispatches to a numpy-accelerated prefilter when available; falls
+    back to the byte-for-byte-identical pure-Python reference loop
+    (`_scan_custom_headers_py`) on any error or when numpy is absent.
+    The pure-Python loop is the one whole-file Pascal-string byte loop in
+    this module (the 5 record scanners + build_topology are already in
+    tvw_native.dll); it fires an `all(printable)` genexpr ~387K times on
+    an X570 board, so the numpy prefilter pays off.
+    """
+    try:
+        if np is not None:
+            return _scan_custom_headers_np(buf)
+    except Exception:
+        pass
+    return _scan_custom_headers_py(buf)
+
+
+def _scan_custom_headers_np(buf: bytes) -> List[Tuple[int, str]]:
+    """numpy fast path for `_scan_custom_headers`.
+
+    The reference loop visits every offset but only does real work where
+    the length byte is in [8, 14] and the following 7 bytes spell
+    ``Custom_``. We vector-locate those candidate length-byte offsets
+    directly:
+
+      1. ``idx = nonzero((a >= 8) & (a <= 14))`` — length-byte candidates
+         (a handful of percent of the file).
+      2. Keep ``idx`` where the 7 bytes at ``+1..+7`` equal ``b"Custom_"``
+         (7 vectorized column compares). That collapses to the ~30
+         genuine headers on a real board.
+      3. Run the EXISTING printable-ASCII gate + ``latin-1`` decode on the
+         survivors only.
+
+    Equivalence with the reference loop: the reference loop's only state
+    is the ``i += 1 + L`` skip after a successful match, which consumes
+    the matched payload ``[i+1, i+1+L)``. We process the surviving
+    candidates in ascending offset order and skip any whose length byte
+    falls inside a prior accepted match's consumed span, reproducing that
+    skip exactly. (A candidate must itself start ``Custom_``, and the only
+    way one could sit inside a prior payload is if that payload embedded
+    the literal ``Custom_`` — handled by the same span-skip the reference
+    loop performs.) The printable-ASCII gate, the ``startswith(b"Custom_")``
+    check, and the ``latin-1`` decode are byte-identical to the reference.
+    """
+    n = len(buf)
+    if n < 8:
+        return _scan_custom_headers_py(buf)
+    a = np.frombuffer(buf, dtype=np.uint8)
+    MIN_L, MAX_L = 8, 14
+
+    # Step 1: length-byte candidates. We also bound i so that i+1+L <= n
+    # for the maximum L (14); a candidate within MAX_L of EOF is rechecked
+    # against its own L below (i + 1 + L <= n) so we don't over/under-trim.
+    hi = n - 1  # mirror the reference `while i < n - 1`
+    lengths = a[:hi]
+    idx = np.nonzero((lengths >= MIN_L) & (lengths <= MAX_L))[0]
+    if idx.size == 0:
+        return []
+
+    # Step 2: require the 7 bytes at +1..+7 to equal b"Custom_". Drop any
+    # candidate whose +7 window would run past EOF first so the column
+    # compares stay in-bounds.
+    prefix = b"Custom_"
+    plen = len(prefix)  # 7
+    idx = idx[idx + plen < n]
+    if idx.size == 0:
+        return []
+    ok = np.ones(idx.shape, dtype=bool)
+    for k in range(plen):
+        ok &= a[idx + 1 + k] == prefix[k]
+    idx = idx[ok]
+    if idx.size == 0:
+        return []
+
+    # Step 3: per-survivor validation, identical to the reference loop,
+    # in ascending offset order with the post-match payload skip.
+    out: List[Tuple[int, str]] = []
+    next_allowed = 0  # smallest offset the reference loop could be at
+    for i in idx.tolist():
+        if i < next_allowed:
+            # The reference loop skipped over this offset because it lay
+            # inside a previously matched payload.
+            continue
+        L = int(a[i])  # in [8, 14] by construction
+        if i + 1 + L > n:
+            continue
+        s = buf[i + 1:i + 1 + L]
+        # Cheap printable-ASCII gate before the substring check. s already
+        # startswith b"Custom_" by construction, so the reference's
+        # s.startswith(b"Custom_") is implicitly satisfied.
+        if all(0x20 <= b < 0x7F for b in s):
+            out.append((i, s.decode('latin-1')))
+            next_allowed = i + 1 + L
+    return out
+
+
+def _scan_custom_headers_py(buf: bytes) -> List[Tuple[int, str]]:
+    """Pure-Python reference implementation of `_scan_custom_headers`.
+
+    Kept VERBATIM as the canonical fallback; the numpy fast path above
+    must produce an identical result.
     """
     out: List[Tuple[int, str]] = []
     n = len(buf)
