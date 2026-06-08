@@ -10,6 +10,7 @@
  *   find_polyline_blocks          (tvw_seg_27_unified_v3.find_polyline_blocks)
  *   find_tagged_polylines_in_gap  (tvw_seg_27_unified_v3.find_tagged_polylines_in_gap)
  *   find_segments_in_gap          (tvw_seg_27_unified_v3.find_segments_in_gap)
+ *   find_pad_runs_in_gap          (tvw_seg_27_unified_v3.find_pad_runs_in_gap)
  *
  * The Python implementations are kept as fallback when the DLL fails to
  * load. Each native function fills a caller-supplied array and returns
@@ -1365,6 +1366,359 @@ EXPORT size_t find_segments_in_gap_native(
                 /* Reset: walk one byte forward from where we started. */
                 p = run_start + 1;
             }
+        } else {
+            ++p;
+        }
+    }
+    return out_n;
+}
+
+
+/* ===================================================================== */
+/* Chip-header scan + per-chip pin-record probe sweep.                    */
+/*                                                                        */
+/* These two functions fold tvw_parser._find_chip_headers and the        */
+/* per-chip 0..64 probe-and-parse loop around                            */
+/* tvw_parser._parse_pin_records into native code. They are FAITHFUL     */
+/* ports: every validation branch in the Python originals has a direct   */
+/* C counterpart in the same order, so the byte offsets / record sets    */
+/* they emit are identical. The Python fallbacks remain authoritative;   */
+/* these only run when the DLL loads AND a one-shot equality check       */
+/* against the Python output has passed.                                 */
+/* ===================================================================== */
+
+/* ----- find_chip_headers ---------------------------------------------- */
+/* Port of _find_chip_headers:
+ *   for i in range(0, n - 50):
+ *     if buf[i] != 0x01: continue
+ *     s1 = _is_pascal(buf, i+1, min_len=3, max_len=80)   # printable 0x20..0x7e
+ *     if not s1: continue
+ *     end_s1 = i + 1 + 1 + len(s1)
+ *     gap = end_s1; skip up to 4 leading zero bytes
+ *     s2 = _is_pascal(buf, gap, min_len=3, max_len=40)
+ *     if not s2: continue
+ *     # footprint filter: every char isalnum() or in "/_-+."
+ *     emit {off=i, after_off=gap+1+len(s2)}    (dev/footprint strings
+ *           are sliced back out on the Python side from off/after_off)
+ *
+ * We return per-hit (off, s1_off, s1_len, s2_off, s2_len, after_off). The
+ * Python wrapper slices dev_name = buf[s1_off+1 : s1_off+1+s1_len] etc.,
+ * reproducing _is_pascal's latin-1 decode exactly.
+ */
+
+typedef struct {
+    uint64_t off;        /* offset of the 0x01 marker */
+    uint32_t s1_off;     /* offset of dev_name Pascal length byte (== off+1) */
+    uint32_t s1_len;
+    uint32_t s2_off;     /* offset of footprint Pascal length byte (== gap) */
+    uint32_t s2_len;
+    uint64_t after_off;  /* gap + 1 + s2_len */
+} ChipHdr;
+
+/* _is_pascal(buf, off, min_len, max_len): returns string length on success
+ * (>0) or 0 if invalid. Mirrors the Python helper's checks exactly:
+ *   off+1 >= buf_len            -> fail
+ *   not (min_len <= L <= max_len) -> fail
+ *   off + 1 + L > buf_len       -> fail
+ *   any byte not in [0x20, 0x7f) -> fail
+ */
+static inline uint32_t is_pascal_len(const uint8_t *buf, size_t buf_len,
+                                     size_t off, uint32_t min_len,
+                                     uint32_t max_len) {
+    if (off + 1 >= buf_len) return 0;
+    uint32_t L = buf[off];
+    if (L < min_len || L > max_len) return 0;
+    if (off + 1 + (size_t)L > buf_len) return 0;
+    const uint8_t *p = buf + off + 1;
+    const uint8_t *e = p + L;
+    for (; p < e; ++p) {
+        if (*p < 0x20 || *p >= 0x7f) return 0;
+    }
+    return L;
+}
+
+/* footprint char filter: isalnum() (ASCII only, since bytes are 0x20..0x7e)
+ * or one of '/', '_', '-', '+', '.'. */
+static inline int footprint_char_ok(uint8_t c) {
+    if ((c >= '0' && c <= '9') ||
+        (c >= 'A' && c <= 'Z') ||
+        (c >= 'a' && c <= 'z')) return 1;
+    return (c == '/' || c == '_' || c == '-' || c == '+' || c == '.');
+}
+
+EXPORT size_t find_chip_headers_native(
+        const uint8_t *buf, size_t buf_len,
+        ChipHdr *out, size_t out_max)
+{
+    size_t out_n = 0;
+    if (buf_len < 50) return 0;
+    size_t limit = buf_len - 50;   /* range(0, n - 50) is exclusive of n-50 */
+    for (size_t i = 0; i < limit; ++i) {
+        if (buf[i] != 0x01) continue;
+        uint32_t s1_len = is_pascal_len(buf, buf_len, i + 1, 3, 80);
+        if (s1_len == 0) continue;
+        size_t end_s1 = i + 1 + 1 + (size_t)s1_len;
+        /* skip 0..4 leading zero pad bytes */
+        size_t gap = end_s1;
+        while (gap < end_s1 + 4 && gap < buf_len && buf[gap] == 0) ++gap;
+        uint32_t s2_len = is_pascal_len(buf, buf_len, gap, 3, 40);
+        if (s2_len == 0) continue;
+        /* footprint char filter on s2 body */
+        int ok = 1;
+        const uint8_t *fp = buf + gap + 1;
+        for (uint32_t k = 0; k < s2_len; ++k) {
+            if (!footprint_char_ok(fp[k])) { ok = 0; break; }
+        }
+        if (!ok) continue;
+        if (out_n < out_max) {
+            out[out_n].off = (uint64_t)i;
+            out[out_n].s1_off = (uint32_t)(i + 1);
+            out[out_n].s1_len = s1_len;
+            out[out_n].s2_off = (uint32_t)gap;
+            out[out_n].s2_len = s2_len;
+            out[out_n].after_off = (uint64_t)(gap + 1 + (size_t)s2_len);
+            ++out_n;
+        }
+        /* Python advances i by 1 each iteration (no skip past the record),
+         * so we do the same — the for-loop ++i handles it. */
+    }
+    return out_n;
+}
+
+
+/* ----- parse_pin_records sweep ---------------------------------------- */
+/* One native call does the WHOLE per-chip probe sweep that the Python
+ * driver loop did:
+ *
+ *   best = []
+ *   for probe in range(0, 64):
+ *       tentative = pin_search_start + probe
+ *       if tentative >= next_marker: break
+ *       recs, _ = _parse_pin_records(buf, tentative, next_marker, 4000)
+ *       if len(recs) > len(best): best = recs
+ *       if len(recs) >= 50: break
+ *   return best
+ *
+ * _parse_pin_records record layout / validation (mirrored exactly):
+ *   L = buf[i];  if L<1 or L>20 or i+1+L+16 > n: break
+ *   name_bytes valid only if every byte in NAME_CHARS set
+ *   first byte b0 must be a digit/upper/lower ASCII letter
+ *   meta = <4 i32 LE> at i+1+L
+ *   abs(meta0) > 1e6 or abs(meta1) > 1e6 -> break
+ *   not (-2 <= meta2 <= 32)             -> break
+ *   not (0 <= meta3 <= 200000)          -> break
+ *   else append; i += 1 + L + 16
+ *   stop after max_records.
+ *
+ * We emit the best run's records as PinRec entries (the name bytes are
+ * sliced back out on the Python side from name_off/name_len so the
+ * latin-1 decode is identical). We also return best_count via the size_t
+ * return value.
+ */
+
+typedef struct {
+    uint32_t name_off;   /* offset of name bytes (== record_i + 1) */
+    uint32_t name_len;   /* L */
+    int32_t  x;          /* meta[0] */
+    int32_t  y;          /* meta[1] */
+    int32_t  flag;       /* meta[2] */
+    int32_t  idx;        /* meta[3] */
+} PinRec;
+
+/* NAME_CHARS membership table, matching the Python `valid_chars` set:
+ *   A-Z a-z 0-9 _ # - + .
+ * Built once into a static 256-byte mask. */
+static uint8_t g_name_char_ok[256];
+static int g_name_char_init = 0;
+static void init_name_char_table(void) {
+    if (g_name_char_init) return;
+    for (int b = 0; b < 256; ++b) g_name_char_ok[b] = 0;
+    for (int c = 'A'; c <= 'Z'; ++c) g_name_char_ok[c] = 1;
+    for (int c = 'a'; c <= 'z'; ++c) g_name_char_ok[c] = 1;
+    for (int c = '0'; c <= '9'; ++c) g_name_char_ok[c] = 1;
+    g_name_char_ok[(uint8_t)'_'] = 1;
+    g_name_char_ok[(uint8_t)'#'] = 1;
+    g_name_char_ok[(uint8_t)'-'] = 1;
+    g_name_char_ok[(uint8_t)'+'] = 1;
+    g_name_char_ok[(uint8_t)'.'] = 1;
+    g_name_char_init = 1;
+}
+
+/* Parse one pin-record run starting at `start`, bounded by n. Writes
+ * records into out[] up to out_cap; returns the number of records
+ * produced (the true run length, capped at max_records), and sets
+ * *end_off to the byte after the last accepted record. Only the first
+ * min(count, out_cap) records are written; for counting-only passes set
+ * out_cap = 0. */
+static uint32_t parse_pin_run(const uint8_t *buf, size_t start, size_t n,
+                              uint32_t max_records,
+                              PinRec *out, size_t out_cap,
+                              size_t *end_off) {
+    const int32_t COORD_MAX = 1000000;
+    size_t i = start;
+    uint32_t count = 0;
+    /* Python loop guard: while i < n - 17 and len(out) < max_records.
+     * Guard against underflow when n < 17. */
+    while (n >= 17 && i < n - 17 && count < max_records) {
+        uint32_t L = buf[i];
+        if (L < 1 || L > 20 || i + 1 + (size_t)L + 16 > n) break;
+        const uint8_t *name = buf + i + 1;
+        int bad = 0;
+        for (uint32_t k = 0; k < L; ++k) {
+            if (!g_name_char_ok[name[k]]) { bad = 1; break; }
+        }
+        if (bad) break;
+        uint8_t b0 = name[0];
+        if (!((b0 >= 0x30 && b0 <= 0x39) ||
+              (b0 >= 0x41 && b0 <= 0x5a) ||
+              (b0 >= 0x61 && b0 <= 0x7a))) break;
+        const uint8_t *mp = buf + i + 1 + L;
+        int32_t m0 = load_i32_le(mp);
+        int32_t m1 = load_i32_le(mp + 4);
+        int32_t m2 = load_i32_le(mp + 8);
+        int32_t m3 = load_i32_le(mp + 12);
+        /* abs(x) > COORD_MAX, done without C abs() to avoid the INT32_MIN
+         * UB trap while matching Python's exact semantics. */
+        if (m0 > COORD_MAX || m0 < -COORD_MAX) break;
+        if (m1 > COORD_MAX || m1 < -COORD_MAX) break;
+        if (m2 < -2 || m2 > 32) break;
+        if (m3 < 0 || m3 > 200000) break;
+        if ((size_t)count < out_cap) {
+            out[count].name_off = (uint32_t)(i + 1);
+            out[count].name_len = L;
+            out[count].x = m0;
+            out[count].y = m1;
+            out[count].flag = m2;
+            out[count].idx = m3;
+        }
+        ++count;
+        i += 1 + (size_t)L + 16;
+    }
+    *end_off = i;
+    return count;
+}
+
+/* Drive the 0..probe_max sweep for ONE chip and emit the best run.
+ *   pin_search_start : chip['after_off']
+ *   next_marker      : bounds[ci+1]
+ *   probe_max        : 64
+ *   early_exit       : 50  (stop probing once a run >= early_exit found)
+ *   max_records      : 4000
+ * Returns the best run's record count; writes that run into out[]. */
+EXPORT size_t parse_pin_records_sweep_native(
+        const uint8_t *buf, size_t buf_len,
+        size_t pin_search_start, size_t next_marker,
+        uint32_t probe_max, uint32_t early_exit, uint32_t max_records,
+        PinRec *out, size_t out_max)
+{
+    init_name_char_table();
+    size_t n = next_marker < buf_len ? next_marker : buf_len;
+
+    uint32_t best_count = 0;
+    size_t best_start = pin_search_start;
+    int found = 0;
+    for (uint32_t probe = 0; probe < probe_max; ++probe) {
+        size_t tentative = pin_search_start + probe;
+        if (tentative >= next_marker) break;
+        size_t end_off;
+        uint32_t cnt = parse_pin_run(buf, tentative, n, max_records,
+                                     out, 0 /*count only*/, &end_off);
+        if (cnt > best_count) {
+            best_count = cnt;
+            best_start = tentative;
+            found = 1;
+        }
+        if (cnt >= early_exit) break;
+    }
+    if (!found || best_count == 0) return 0;
+
+    /* Re-parse the winning probe into out[] for real. The single re-pass
+     * over <=4000 records is negligible vs. the 64-probe sweep. */
+    size_t end_off;
+    uint32_t written = parse_pin_run(buf, best_start, n, max_records,
+                                     out, out_max, &end_off);
+    return (size_t)written;
+}
+
+
+/* ----- find_pad_runs_in_gap ------------------------------------------- */
+/* Gap-ranged variant of the 38-byte pad-run scan used by seg_27's
+ * analyze(). FAITHFUL port of
+ * tvw_seg_27_unified_v3.find_pad_runs_in_gap:
+ *
+ *   def is_pad(off):
+ *       if off + 38 > n: return False
+ *       if buf[off+20:off+22] != b'\x00\x00': return False
+ *       nid = struct.unpack_from('<I', buf, off+22)[0]
+ *       return 0 < nid < 4000
+ *   p = gap_start
+ *   while p + 38 <= n:
+ *       if is_pad(p):
+ *           run_start = p; cnt = 0
+ *           while p + 38 <= n and is_pad(p):
+ *               p += 38; cnt += 1
+ *           if cnt >= min_run:
+ *               runs.append((run_start, p))
+ *       else:
+ *           p += 1
+ *
+ * Important: unlike find_segments_in_gap, there is NO `p = run_start + 1`
+ * backoff. When a run is found but shorter than min_run, the inner loop
+ * has already advanced p past the run (to the first non-pad position) and
+ * the outer loop simply continues from there. The only +1 step is the
+ * outer `else` branch when the very first byte is not a pad start.
+ *
+ * Output reuses the SegRun struct (start, end, [count unused on the
+ * Python side]); the wrapper returns (start, end) tuples.
+ *
+ * This scanner is intentionally NOT a memchr/find_pair scan: the Python
+ * original walks byte-by-byte, and to guarantee byte-identical run
+ * boundaries we walk the same way here.
+ */
+
+EXPORT size_t find_pad_runs_in_gap_native(
+        const uint8_t *buf, size_t buf_len,
+        size_t gap_start, size_t gap_end,
+        uint32_t min_run,
+        SegRun *out, size_t out_max)
+{
+    if (gap_end > buf_len) gap_end = buf_len;
+    size_t n = gap_end;
+    size_t out_n = 0;
+
+    /* is_pad(off): off+38 <= n AND buf[off+20..21]==0,0 AND
+     * 0 < u32@(off+22) < 4000. The outer/inner `p + 38 <= n` bound is
+     * already checked by the loop guards, so is_pad only needs the
+     * sentinel + net-id test (matching the Python where the off+38>n
+     * branch is unreachable under those guards). */
+    size_t p = gap_start;
+    while (p + 38 <= n) {
+        int is_pad =
+            (buf[p + 20] == 0x00 && buf[p + 21] == 0x00);
+        if (is_pad) {
+            uint32_t nid = load_u32_le(buf + p + 22);
+            if (!(nid > 0 && nid < 4000)) is_pad = 0;
+        }
+
+        if (is_pad) {
+            size_t run_start = p;
+            uint32_t cnt = 0;
+            while (p + 38 <= n) {
+                if (!(buf[p + 20] == 0x00 && buf[p + 21] == 0x00)) break;
+                uint32_t nid2 = load_u32_le(buf + p + 22);
+                if (!(nid2 > 0 && nid2 < 4000)) break;
+                p += 38;
+                ++cnt;
+            }
+            if (cnt >= min_run) {
+                if (out_n < out_max) {
+                    out[out_n].start = (uint64_t)run_start;
+                    out[out_n].end = (uint64_t)p;
+                    out[out_n].count = cnt;
+                    ++out_n;
+                }
+            }
+            /* No backoff: p already sits at the first non-pad position. */
         } else {
             ++p;
         }

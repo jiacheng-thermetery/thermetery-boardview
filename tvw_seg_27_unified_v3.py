@@ -106,6 +106,14 @@ def find_tagged_polylines_in_gap(buf, gap_start, gap_end, term_size=4,
 
 
 def find_pad_runs_in_gap(buf, gap_start, gap_end, min_run=50):
+    # Native fast path — see tvw_native.c.
+    try:
+        from tvw_native import find_pad_runs_in_gap as _nat_pad_runs
+        result = _nat_pad_runs(buf, gap_start, gap_end, min_run=min_run)
+        if result is not None:
+            return result
+    except Exception:
+        pass
     n = gap_end
     runs = []
 
