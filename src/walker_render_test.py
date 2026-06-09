@@ -24,8 +24,8 @@ from typing import List, Optional, Tuple
 
 import tkinter as tk
 
-import walker
-from boardview import parse as parse_board
+from . import walker
+from .parsers.boardview import parse as parse_board
 
 
 BOARDS: List[Tuple[str, str, Optional[str]]] = [

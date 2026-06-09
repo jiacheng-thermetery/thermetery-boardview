@@ -97,7 +97,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from gencad_parser import BoardModel, Component, Shape
+from .gencad_parser import BoardModel, Component, Shape
 
 
 XZZ_GLOBAL_SCALE = 10000  # raw -> mils

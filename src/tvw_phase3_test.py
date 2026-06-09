@@ -24,8 +24,8 @@ import time
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
-import boardview
-from gencad_parser import BoardModel, BrokenNet
+from .parsers import boardview
+from .parsers.gencad_parser import BoardModel, BrokenNet
 
 
 BOARDS: List[str] = [

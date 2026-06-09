@@ -68,8 +68,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from gencad_parser import BoardModel, Component, Shape
-from tvw_master_fp import parse_master_footprints, pins_world_positions
+from .gencad_parser import BoardModel, Component, Shape
+from .tvw_master_fp import parse_master_footprints, pins_world_positions
 
 
 # --------------------------------------------------------------------------

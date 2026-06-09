@@ -70,7 +70,7 @@ import zlib
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from gencad_parser import BoardModel, Component, Shape
+from .gencad_parser import BoardModel, Component, Shape
 
 
 # Validation parity for the 44-word RC6 key. From OpenBoardView/FZFile.cpp.

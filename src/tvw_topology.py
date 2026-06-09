@@ -77,7 +77,7 @@ import numpy as np
 
 # READ-ONLY imports of the Phase 1 / production code. We never mutate
 # anything here; we only call into them.
-from tvw_seg_27_unified_v3 import (
+from .parsers.tvw_seg_27_unified_v3 import (
     find_polyline_blocks,
     find_tagged_polylines_in_gap,
     find_pad_runs_in_gap,
@@ -86,7 +86,7 @@ from tvw_seg_27_unified_v3 import (
     merge_intervals,
     find_gaps,
 )
-from tvw_parser import _find_net_table, _build_net_index
+from .parsers.tvw_parser import _find_net_table, _build_net_index
 
 
 # --------------------------------------------------------------------------

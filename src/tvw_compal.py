@@ -47,7 +47,7 @@ from typing import Dict, List, Optional, Tuple
 import math
 import re
 
-from gencad_parser import BoardModel, Component, Shape
+from .parsers.gencad_parser import BoardModel, Component, Shape
 
 
 # --------------------------------------------------------------------------

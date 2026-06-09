@@ -15,7 +15,7 @@ import time
 from collections import Counter, defaultdict
 from typing import Dict, List, Tuple
 
-from tvw_topology import TraceGraph, KNOWN_BOARDS
+from .tvw_topology import TraceGraph, KNOWN_BOARDS
 
 
 # Universal nets we expect to find on every board. Order matters: GND
