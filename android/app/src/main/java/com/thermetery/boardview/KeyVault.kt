@@ -41,4 +41,22 @@ object KeyVault {
             Log.w(TAG, "Could not save key for $format (still usable this session)", e)
         }
     }
+
+    /** True if a remembered key exists for [format]. */
+    fun has(context: Context, format: String): Boolean = load(context, format) != null
+
+    /** Forget the remembered key for [format]. Returns true if one was removed. */
+    fun clear(context: Context, format: String): Boolean = try {
+        val f = keyFile(context, format)
+        if (f.isFile) {
+            val ok = f.delete()
+            Log.i(TAG, "Cleared remembered key for $format ($ok)")
+            ok
+        } else {
+            false
+        }
+    } catch (e: SecurityException) {
+        Log.w(TAG, "Could not clear key for $format", e)
+        false
+    }
 }

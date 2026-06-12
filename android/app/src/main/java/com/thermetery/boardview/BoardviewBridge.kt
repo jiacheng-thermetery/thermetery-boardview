@@ -21,6 +21,11 @@ class BoardviewBridge(private val activity: MainActivity) {
     }
 
     @JavascriptInterface
+    fun openKeyManager() {
+        activity.runOnUiThread { activity.launchKeyManager() }
+    }
+
+    @JavascriptInterface
     fun log(msg: String) {
         Log.i("BoardviewJS", msg)
     }

@@ -57,5 +57,13 @@
                 <data android:pathPattern=".*\\..*\\..*\\.bv" />
             </intent-filter>
         </activity>
+
+        <!-- Standalone key-management screen, launched from the viewer
+             toolbar (BoardviewBridge.openKeyManager). Not exported. -->
+        <activity
+            android:name=".KeyManagerActivity"
+            android:exported="false"
+            android:label="@string/key_manager_title"
+            android:parentActivityName=".MainActivity" />
     </application>
 </manifest>

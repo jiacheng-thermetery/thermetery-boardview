@@ -73,6 +73,7 @@
   var btnLayer  = document.getElementById("bv-btn-layer");
   var btnTraces = document.getElementById("bv-btn-traces");
   var btnFit    = document.getElementById("bv-btn-fit");
+  var btnKeys   = document.getElementById("bv-btn-keys");
   var elErrlog  = document.getElementById("bv-errlog");
   var elDev     = document.getElementById("bv-dev");
   var elDevFile = document.getElementById("bv-dev-file");
@@ -1186,6 +1187,18 @@
   btnFit.addEventListener("click", function () {
     fitView();
   });
+
+  if (btnKeys) {
+    if (hasAndroid && window.Android.openKeyManager) {
+      btnKeys.addEventListener("click", function () {
+        window.Android.openKeyManager();
+      });
+    } else {
+      // Key storage is an Android-shell feature; no equivalent in the
+      // desktop dev harness.
+      btnKeys.style.display = "none";
+    }
+  }
 
   btnLayer.addEventListener("click", function () {
     if (!board) return;

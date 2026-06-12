@@ -126,6 +126,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Called (on the UI thread) from BoardviewBridge.openKeyManager. */
+    fun launchKeyManager() {
+        startActivity(Intent(this, KeyManagerActivity::class.java))
+    }
+
     /** Called (on a WebView thread) from BoardviewBridge.loadTraces. */
     fun requestTraces() {
         if (!boardOpen) {
