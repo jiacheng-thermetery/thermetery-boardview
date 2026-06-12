@@ -74,6 +74,12 @@
   var btnTraces = document.getElementById("bv-btn-traces");
   var btnFit    = document.getElementById("bv-btn-fit");
   var btnKeys   = document.getElementById("bv-btn-keys");
+  var btnRotL   = document.getElementById("bv-btn-rotl");
+  var btnRotR   = document.getElementById("bv-btn-rotr");
+  var elToolbar = document.getElementById("bv-toolbar");
+  var elPanelNet = document.getElementById("bv-panel-net");
+  var elTabPins = document.getElementById("bv-tab-pins");
+  var elTabNet  = document.getElementById("bv-tab-net");
   var elErrlog  = document.getElementById("bv-errlog");
   var elDev     = document.getElementById("bv-dev");
   var elDevFile = document.getElementById("bv-dev-file");
@@ -100,7 +106,7 @@
   var hlNet = -1;          // highlighted net index, -1 = none
   var sel = null;          // {ci, pin}  pin = -1 when whole component
 
-  var view = { k: 1, tx: 0, ty: 0 };
+  var view = { k: 1, tx: 0, ty: 0, rot: 0 };   // rot = view rotation (radians)
   var cssW = 0, cssH = 0, dpr = Math.max(1, window.devicePixelRatio || 1);
 
   var dirty = false, rafPending = false;
@@ -127,6 +133,23 @@
   function worldX(sx) { return (sx - view.tx) / view.k; }
   function worldY(sy) { return (view.ty - sy) / view.k; }
 
+  // --- rotation helpers ---------------------------------------------------
+  // The world->base-screen transform above is rotation-free; a final
+  // rotation about the viewport centre is layered on at composite time.
+  // Anything mapping a screen point into world space must first undo it.
+  function rotVec(x, y, ang) {
+    var c = Math.cos(ang), s = Math.sin(ang);
+    return { x: x * c - y * s, y: x * s + y * c };
+  }
+  function rotAboutCenter(sx, sy, ang) {
+    if (!ang) return { x: sx, y: sy };
+    var cx = cssW / 2, cy = cssH / 2;
+    var p = rotVec(sx - cx, sy - cy, ang);
+    return { x: p.x + cx, y: p.y + cy };
+  }
+  // Screen coords -> base (un-rotated) screen coords feeding worldX/worldY.
+  function screenToBase(sx, sy) { return rotAboutCenter(sx, sy, -view.rot); }
+
   function clampK(k) {
     if (!board) return k;
     return Math.min(board.maxK, Math.max(board.minK, k));
@@ -134,16 +157,18 @@
 
   function applyZoomAt(fx, fy, factor) {
     if (!board) return;
-    var wx = worldX(fx), wy = worldY(fy);
+    var b = screenToBase(fx, fy);
+    var wx = worldX(b.x), wy = worldY(b.y);
     var k2 = clampK(view.k * factor);
     view.k = k2;
-    view.tx = fx - wx * k2;
-    view.ty = fy + wy * k2;
+    view.tx = b.x - wx * k2;
+    view.ty = b.y + wy * k2;
     scheduleRender();
   }
 
   function fitInsets() {
-    return { t: 56, r: 12, b: 34, l: 12 };
+    var top = (elToolbar ? elToolbar.offsetHeight : 56) + 10;
+    return { t: top, r: 12, b: 34, l: 12 };
   }
 
   function fitView() {
@@ -154,7 +179,11 @@
     var ins = fitInsets();
     var aw = Math.max(40, cssW - ins.l - ins.r);
     var ah = Math.max(40, cssH - ins.t - ins.b);
-    var k = Math.min(aw / bw, ah / bh);
+    // The board's on-screen footprint grows with rotation; fit the rotated
+    // axis-aligned extents so a spun board still lands fully in view.
+    var ac = Math.abs(Math.cos(view.rot)), as = Math.abs(Math.sin(view.rot));
+    var rw = bw * ac + bh * as, rh = bw * as + bh * ac;
+    var k = Math.min(aw / rw, ah / rh);
     view.k = clampK(k);
     var cx = (bb[0] + bb[2]) / 2, cy = (bb[1] + bb[3]) / 2;
     view.tx = ins.l + aw / 2 - cx * view.k;
@@ -379,6 +408,7 @@
       hlNet = -1;
       sel = null;
       layerIdx = -1;
+      view.rot = 0;
       closePanel();
       updateChip();
       // dev-harness JSON may carry segments inline (board+traces in one file)
@@ -473,6 +503,11 @@
       canvas.width = w;
       canvas.height = h;
     }
+    // expose the (now two-row) toolbar height so chip/toast/errlog sit below it
+    if (elToolbar) {
+      document.documentElement.style.setProperty(
+        "--bar-h", elToolbar.offsetHeight + "px");
+    }
     needRaster = true;
     scheduleRender();
   }
@@ -483,6 +518,15 @@
   function rasterize() {
     if (!board || cssW < 2 || cssH < 2) { raster.valid = false; return; }
     var marginX = cssW * 0.5, marginY = cssH * 0.5;
+    // When rotated, the captured (un-rotated) raster must extend far enough
+    // that rotating it about the centre still covers the whole viewport.
+    if (view.rot) {
+      var ac = Math.abs(Math.cos(view.rot)), as = Math.abs(Math.sin(view.rot));
+      var halfW = 0.5 * (cssW * ac + cssH * as);
+      var halfH = 0.5 * (cssW * as + cssH * ac);
+      marginX = Math.max(marginX, halfW - cssW * 0.5 + cssW * 0.25);
+      marginY = Math.max(marginY, halfH - cssH * 0.5 + cssH * 0.25);
+    }
     var rw = cssW + 2 * marginX, rh = cssH + 2 * marginY;
     var rDpr = Math.min(dpr, 2);
     var maxPix = 14e6;
@@ -694,6 +738,16 @@
       return;
     }
 
+    // All board content rotates about the viewport centre; the background
+    // above stays upright so the corners letterbox cleanly.
+    ctx.save();
+    if (view.rot) {
+      var rcx = cssW / 2, rcy = cssH / 2;
+      ctx.translate(rcx, rcy);
+      ctx.rotate(view.rot);
+      ctx.translate(-rcx, -rcy);
+    }
+
     // blit static raster with the delta transform
     if (raster.valid) {
       var K = view.k / raster.k;
@@ -707,6 +761,7 @@
 
     drawComponents();
     drawSelection();
+    ctx.restore();
   }
 
   function drawComponents() {
@@ -831,7 +886,8 @@
   }
 
   function hitTest(sx, sy) {
-    var wx = worldX(sx), wy = worldY(sy);
+    var b = screenToBase(sx, sy);
+    var wx = worldX(b.x), wy = worldY(b.y);
     var radW = TAP_RADIUS_CSS / view.k;
     var rad2 = radW * radW;
 
@@ -899,7 +955,7 @@
     return board.nets[idx];
   }
 
-  function selectComp(ci, pin, center) {
+  function selectComp(ci, pin, center, focusNet) {
     sel = { ci: ci, pin: (pin == null ? -1 : pin) };
     var c = board.comps[ci];
     elPanelRef.textContent = c.ref;
@@ -909,6 +965,16 @@
       (c.rotation ? "  ·  " + c.rotation + "°" : "");
     buildPinRows(c);
     elPanel.classList.add("open");
+    // Tapping a pin reveals its net in the Net tab; tapping a body stays on Pins.
+    var pinNet = (sel.pin >= 0) ? board.pinNet[c.pinStart + sel.pin] : -1;
+    if (focusNet && pinNet >= 0) {
+      setHighlight(pinNet);
+      buildNetTab(pinNet);   // refresh selection marker even if net unchanged
+      showTab("net");
+    } else {
+      buildNetTab(hlNet);
+      showTab("pins");
+    }
     if (center) {
       var bb = c.bbox;
       var maxDim = Math.max(bb[2] - bb[0], bb[3] - bb[1], board.pitch * 2);
@@ -949,6 +1015,87 @@
     elPanelPins.appendChild(frag);
   }
 
+  /* ---- Net tab: every pin on the highlighted net, across all parts ---- */
+  var MAX_NET_ROWS = 1500;
+  var activeTab = "pins";
+
+  function showTab(name) {
+    activeTab = name;
+    if (elTabPins) elTabPins.classList.toggle("on", name === "pins");
+    if (elTabNet)  elTabNet.classList.toggle("on", name === "net");
+    elPanelPins.classList.toggle("hidden", name !== "pins");
+    if (elPanelNet) elPanelNet.classList.toggle("hidden", name !== "net");
+  }
+
+  function buildNetTab(net) {
+    if (!elPanelNet) return;
+    elPanelNet.textContent = "";
+    if (!board || net < 0) {
+      var empty = document.createElement("div");
+      empty.className = "bv-netempty";
+      empty.textContent = "Tap a pin to show its net here.";
+      elPanelNet.appendChild(empty);
+      return;
+    }
+    var members = [], parts = {};
+    for (var i = 0; i < board.nPins; i++) {
+      if (board.pinNet[i] !== net) continue;
+      var ci = board.pinComp[i];
+      var c = board.comps[ci];
+      var local = i - c.pinStart;
+      var pname = (c.pins[local] && c.pins[local].name != null)
+        ? String(c.pins[local].name) : String(local + 1);
+      members.push({ ci: ci, local: local, ref: c.ref, name: pname });
+      parts[ci] = true;
+    }
+    var nParts = 0; for (var p in parts) nParts++;
+    var frag = document.createDocumentFragment();
+    var head = document.createElement("div");
+    head.className = "bv-nethead";
+    var hn = document.createElement("span");
+    hn.className = "bv-netheadname";
+    hn.textContent = netName(net) || ("net " + net);
+    var hm = document.createElement("span");
+    hm.className = "bv-netheadmeta";
+    hm.textContent = members.length + " pin" + (members.length === 1 ? "" : "s") +
+      "  ·  " + nParts + " part" + (nParts === 1 ? "" : "s");
+    head.appendChild(hn); head.appendChild(hm);
+    frag.appendChild(head);
+    var nRows = Math.min(members.length, MAX_NET_ROWS);
+    for (i = 0; i < nRows; i++) {
+      var m = members[i];
+      var row = document.createElement("div");
+      row.className = "bv-netrow";
+      if (sel && sel.ci === m.ci && sel.pin === m.local) row.className += " sel";
+      row.dataset.ci = m.ci;
+      row.dataset.pin = m.local;
+      var rr = document.createElement("span");
+      rr.className = "bv-netref";
+      rr.textContent = m.ref;
+      var rp = document.createElement("span");
+      rp.className = "bv-netpin";
+      rp.textContent = m.name;
+      row.appendChild(rr); row.appendChild(rp);
+      frag.appendChild(row);
+    }
+    if (members.length > nRows) {
+      var more = document.createElement("div");
+      more.className = "bv-netrow more";
+      more.textContent = "… " + (members.length - nRows) + " more";
+      frag.appendChild(more);
+    }
+    elPanelNet.appendChild(frag);
+  }
+
+  if (elTabPins) elTabPins.addEventListener("click", function () { showTab("pins"); });
+  if (elTabNet)  elTabNet.addEventListener("click", function () { showTab("net"); });
+
+  if (elPanelNet) elPanelNet.addEventListener("click", function (e) {
+    var row = e.target.closest ? e.target.closest(".bv-netrow") : null;
+    if (!row || row.dataset.ci == null) return;
+    selectComp(row.dataset.ci | 0, row.dataset.pin | 0, true, false);
+  });
+
   elPanelPins.addEventListener("click", function (e) {
     var row = e.target.closest ? e.target.closest(".bv-pinrow") : null;
     if (!row || row.dataset.pin == null || !sel) return;
@@ -957,9 +1104,12 @@
     sel.pin = i;
     var net = board.pinNet[c.pinStart + i];
     if (net >= 0) {
-      setHighlight(net === hlNet ? -1 : net);   // tap again to clear
+      var willHl = (net !== hlNet);
+      setHighlight(willHl ? net : -1);   // tap again to clear
+      showTab(willHl ? "net" : "pins");
+    } else {
+      buildPinRows(c);
     }
-    buildPinRows(c);
     scheduleRender();
   });
 
@@ -973,11 +1123,29 @@
     elPanel.classList.remove("open");
   }
 
+  // Open the panel as a pure net view (no component selected) — used by net
+  // search so the Net tab shows the net's members straight away.
+  function openNetPanel(net) {
+    sel = null;
+    elPanelRef.textContent = netName(net) || ("net " + net);
+    elPanelMeta.textContent = "net";
+    elPanelPins.textContent = "";
+    var hint = document.createElement("div");
+    hint.className = "bv-netempty";
+    hint.textContent = "Tap a component to list its pins.";
+    elPanelPins.appendChild(hint);
+    buildNetTab(net);
+    showTab("net");
+    elPanel.classList.add("open");
+    scheduleRender();
+  }
+
   function setHighlight(net) {
     if (net === hlNet) return;
     hlNet = net;
     updateChip();
     if (sel) buildPinRows(board.comps[sel.ci]);
+    buildNetTab(hlNet);
     needRaster = true;
     scheduleRender();
   }
@@ -1062,10 +1230,12 @@
       pointers.forEach(function (p) { pts.push(p); });
       var cx = (pts[0].x + pts[1].x) / 2, cy = (pts[0].y + pts[1].y) / 2;
       var d0 = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+      var a0 = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
+      var bc = screenToBase(cx, cy);
       gesture = {
         type: "pinch",
-        wfx: worldX(cx), wfy: worldY(cy),
-        k0: view.k, d0: d0
+        wfx: worldX(bc.x), wfy: worldY(bc.y),   // world point under the centroid
+        k0: view.k, d0: d0, a0: a0, rot0: view.rot, rotOn: false
       };
       gestureActive = true;
     }
@@ -1082,10 +1252,21 @@
       pointers.forEach(function (q) { pts.push(q); });
       var cx = (pts[0].x + pts[1].x) / 2, cy = (pts[0].y + pts[1].y) / 2;
       var d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+      var a = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
       var k2 = clampK(gesture.k0 * d / gesture.d0);
+      // twist -> rotation, with a small dead-zone so a plain pinch-zoom
+      // doesn't accidentally spin the board.
+      var dAng = a - gesture.a0;
+      while (dAng > Math.PI) dAng -= 2 * Math.PI;
+      while (dAng < -Math.PI) dAng += 2 * Math.PI;
+      if (!gesture.rotOn && Math.abs(dAng) > 0.14) gesture.rotOn = true;
+      var rot2 = gesture.rotOn ? gesture.rot0 + dAng : gesture.rot0;
       view.k = k2;
-      view.tx = cx - gesture.wfx * k2;
-      view.ty = cy + gesture.wfy * k2;
+      view.rot = rot2;
+      // keep the world point under the centroid fixed under the new transform
+      var ub = rotAboutCenter(cx, cy, -rot2);
+      view.tx = ub.x - gesture.wfx * k2;
+      view.ty = ub.y + gesture.wfy * k2;
       scheduleRender();
     } else if (gesture.type === "pan" && e.pointerId === gesture.id) {
       var dx = e.clientX - gesture.sx, dy = e.clientY - gesture.sy;
@@ -1094,8 +1275,10 @@
         gestureActive = true;
       }
       if (gesture.moved) {
-        view.tx = gesture.tx0 + dx;
-        view.ty = gesture.ty0 + dy;
+        // a screen drag maps to a base-space pan once rotation is undone
+        var pd = rotVec(dx, dy, -view.rot);
+        view.tx = gesture.tx0 + pd.x;
+        view.ty = gesture.ty0 + pd.y;
         scheduleRender();
       }
     }
@@ -1149,7 +1332,7 @@
     lastTapY = y;
     var hit = hitTest(x, y);
     if (hit) {
-      selectComp(hit.ci, hit.pin, false);
+      selectComp(hit.ci, hit.pin, false, hit.pin >= 0);
     } else {
       sel = null;
       closePanel();
@@ -1187,6 +1370,17 @@
   btnFit.addEventListener("click", function () {
     fitView();
   });
+
+  function rotateBy(delta) {
+    if (!board) return;
+    view.rot += delta;
+    if (view.rot > Math.PI) view.rot -= 2 * Math.PI;
+    else if (view.rot < -Math.PI) view.rot += 2 * Math.PI;
+    needRaster = true;
+    scheduleRender();
+  }
+  if (btnRotL) btnRotL.addEventListener("click", function () { rotateBy(-Math.PI / 2); });
+  if (btnRotR) btnRotR.addEventListener("click", function () { rotateBy(Math.PI / 2); });
 
   if (btnKeys) {
     if (hasAndroid && window.Android.openKeyManager) {
@@ -1300,6 +1494,7 @@
     } else {
       setHighlight(hitEnt.idx);
       centerNet(hitEnt.idx);
+      openNetPanel(hitEnt.idx);
     }
     elSearch.blur();
   }

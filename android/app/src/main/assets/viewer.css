@@ -48,13 +48,23 @@ html, body {
   left: 0;
   right: 0;
   display: flex;
+  flex-direction: column;     /* row 1: buttons (scrollable) · row 2: search */
   gap: 6px;
-  align-items: center;
   padding: calc(6px + env(safe-area-inset-top, 0px)) 8px 6px 8px;
   background: var(--bar-bg);
   border-bottom: 1px solid var(--bar-border);
   z-index: 20;
 }
+
+#bv-btnstrip {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  overflow-x: auto;           /* fixes the un-scrollable, overflowing toolbar */
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+#bv-btnstrip::-webkit-scrollbar { display: none; }
 
 #bv-toolbar button {
   flex: 0 0 auto;
@@ -70,6 +80,13 @@ html, body {
   cursor: pointer;
 }
 
+#bv-btn-rotl, #bv-btn-rotr {
+  min-width: 44px;
+  padding: 0 8px;
+  font-size: 19px;
+  line-height: 1;
+}
+
 #bv-toolbar button:active { background: #2a3460; }
 
 #bv-toolbar button.on {
@@ -83,15 +100,14 @@ html, body {
 }
 
 #bv-search {
-  flex: 1 1 60px;
-  min-width: 60px;
-  height: 34px;
-  padding: 0 10px;
+  width: 100%;                /* full-width row — comfortable to type into */
+  height: 38px;
+  padding: 0 12px;
   border: 1px solid var(--bar-border);
   border-radius: 6px;
   background: #131736;
   color: var(--fg);
-  font-size: 13px;
+  font-size: 15px;
   font-family: var(--mono);
   outline: none;
 }
@@ -102,7 +118,7 @@ html, body {
 
 #bv-netchip {
   position: fixed;
-  top: calc(54px + env(safe-area-inset-top, 0px));
+  top: calc(var(--bar-h, 92px) + 6px);
   left: 8px;
   display: flex;
   align-items: center;
@@ -197,10 +213,101 @@ html, body {
   cursor: pointer;
 }
 
-#bv-panel-pins {
+/* tabs: Pins | Net */
+#bv-panel-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--bar-border);
+}
+
+.bv-tab {
+  flex: 1 1 auto;
+  height: 40px;
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.bv-tab.on {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.bv-tab:active { background: #1a2040; }
+
+#bv-panel-body {
+  flex: 1 1 auto;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+}
+
+#bv-panel-pins,
+#bv-panel-net {
   font-family: var(--mono);
+  font-size: 13px;
+}
+
+/* net tab */
+.bv-nethead {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+  padding: 8px 14px;
+  position: sticky;
+  top: 0;
+  background: var(--bar-bg);
+  border-bottom: 1px solid var(--bar-border);
+}
+
+.bv-netheadname {
+  color: var(--highlight);
+  font-weight: bold;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bv-netheadmeta {
+  flex: 0 0 auto;
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.bv-netrow {
+  display: flex;
+  gap: 12px;
+  padding: 7px 14px;
+  border-bottom: 1px solid rgba(42, 48, 82, 0.5);
+  cursor: pointer;
+}
+
+.bv-netrow:active { background: #1a2040; }
+.bv-netrow.sel { background: #16224a; }
+.bv-netrow.more { color: var(--fg-dim); cursor: default; }
+
+.bv-netref {
+  flex: 0 0 76px;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bv-netpin {
+  flex: 1 1 auto;
+  color: #ffff88;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bv-netempty {
+  padding: 16px 14px;
+  color: var(--fg-dim);
   font-size: 13px;
 }
 
@@ -258,7 +365,7 @@ html, body {
 
 #bv-toast {
   position: fixed;
-  top: calc(58px + env(safe-area-inset-top, 0px));
+  top: calc(var(--bar-h, 92px) + 8px);
   left: 50%;
   transform: translateX(-50%);
   max-width: 86vw;
@@ -314,7 +421,7 @@ html, body {
 
 #bv-errlog {
   position: fixed;
-  top: calc(48px + env(safe-area-inset-top, 0px));
+  top: calc(var(--bar-h, 92px) + 2px);
   left: 0;
   right: 0;
   max-height: 30vh;
