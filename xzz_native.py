@@ -18,6 +18,7 @@ back to the pure-Python implementation.
 from __future__ import annotations
 
 import ctypes
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -44,12 +45,21 @@ def _load() -> Optional[ctypes.CDLL]:
     _LOAD_ATTEMPTED = True
 
     here = Path(__file__).resolve().parent
-    for name in _candidate_names():
-        path = here / name
-        if not path.exists():
-            continue
+    candidates: list[str] = []
+    env_dir = os.environ.get("BOARDVIEW_NATIVE_DIR")
+    if env_dir:
+        candidates += [str(Path(env_dir) / n) for n in _candidate_names()]
+    candidates += [str(here / n) for n in _candidate_names()
+                   if (here / n).exists()]
+    if not sys.platform.startswith("win"):
+        # Android/APK and system installs: the lib may not exist as a plain
+        # file next to this module (it lives in the app's nativeLibraryDir,
+        # or this module is packaged inside a zip). A bare soname lets
+        # dlopen search the dynamic linker's own paths.
+        candidates += [n for n in _candidate_names() if n.startswith("lib")]
+    for cand in candidates:
         try:
-            lib = ctypes.CDLL(str(path))
+            lib = ctypes.CDLL(cand)
         except OSError:
             continue
 

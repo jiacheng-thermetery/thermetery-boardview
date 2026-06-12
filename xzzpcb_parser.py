@@ -939,7 +939,12 @@ def _resolve_key(explicit: Optional[int]) -> Optional[int]:
                 continue
             if parsed is not None:
                 return parsed
-    legacy = Path.home() / ".boardviewer" / "xzz_key"
+    try:
+        legacy = Path.home() / ".boardviewer" / "xzz_key"
+    except RuntimeError:
+        # Path.home() raises on minimal environments with no resolvable
+        # home directory (e.g. some embedded/Android runtimes).
+        return None
     if legacy.exists():
         try:
             parsed = _parse_key_text(legacy.read_text(encoding="utf-8"))

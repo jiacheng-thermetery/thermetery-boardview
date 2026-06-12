@@ -22,6 +22,7 @@ callers fall through to the Python implementation transparently.
 from __future__ import annotations
 
 import ctypes
+import os
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -117,12 +118,20 @@ def _load() -> Optional[ctypes.CDLL]:
         names = ["tvw_native.dylib", "libtvw_native.dylib"]
     else:
         names = ["tvw_native.so", "libtvw_native.so"]
-    for n in names:
-        p = here / n
-        if not p.exists():
-            continue
+    candidates: list[str] = []
+    env_dir = os.environ.get("BOARDVIEW_NATIVE_DIR")
+    if env_dir:
+        candidates += [str(Path(env_dir) / n) for n in names]
+    candidates += [str(here / n) for n in names if (here / n).exists()]
+    if not sys.platform.startswith("win"):
+        # Android/APK and system installs: the lib may not exist as a plain
+        # file next to this module (it lives in the app's nativeLibraryDir,
+        # or this module is packaged inside a zip). A bare soname lets
+        # dlopen search the dynamic linker's own paths.
+        candidates += [n for n in names if n.startswith("lib")]
+    for cand in candidates:
         try:
-            lib = ctypes.CDLL(str(p))
+            lib = ctypes.CDLL(cand)
         except OSError:
             continue
 

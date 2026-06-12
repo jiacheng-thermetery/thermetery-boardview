@@ -344,6 +344,11 @@ def analyze(file_path, region_start, region_end, label):
 
 
 if __name__ == "__main__":
-    analyze("C:/Claude Code/Z490 VISION G r1.0.tvw", 8_528, 4_761_170, "Z490 Custom_35")
-    analyze("C:/Claude Code/Gigabyte_X570_GAMING_X_REV1.01.tvw", 4_754, 1_838_204, "X570 Custom_21")
-    analyze("C:/Claude Code/B550_AORUS_PRO_AC_REV1.0.tvw", 6_474, 3_978_556, "B550 Custom_26")
+    import sys as _sys
+
+    # Usage: python tvw_seg_27_unified_v3.py FILE.tvw REGION_START REGION_END [LABEL]
+    if len(_sys.argv) < 4:
+        print(__doc__ or "usage: tvw_seg_27_unified_v3.py FILE.tvw START END [LABEL]")
+        _sys.exit(2)
+    _label = _sys.argv[4] if len(_sys.argv) > 4 else Path(_sys.argv[1]).name
+    analyze(_sys.argv[1], int(_sys.argv[2]), int(_sys.argv[3]), _label)

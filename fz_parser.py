@@ -114,12 +114,20 @@ def _load_native_rc6():
         names = ["rc6_native.dylib", "librc6_native.dylib"]
     else:
         names = ["rc6_native.so", "librc6_native.so"]
-    for n in names:
-        p = here / n
-        if not p.exists():
-            continue
+    candidates: list[str] = []
+    env_dir = os.environ.get("BOARDVIEW_NATIVE_DIR")
+    if env_dir:
+        candidates += [str(Path(env_dir) / n) for n in names]
+    candidates += [str(here / n) for n in names if (here / n).exists()]
+    if not sys.platform.startswith("win"):
+        # Android/APK and system installs: the lib may not exist as a plain
+        # file next to this module (it lives in the app's nativeLibraryDir,
+        # or this module is packaged inside a zip). A bare soname lets
+        # dlopen search the dynamic linker's own paths.
+        candidates += [n for n in names if n.startswith("lib")]
+    for cand in candidates:
         try:
-            lib = ctypes.CDLL(str(p))
+            lib = ctypes.CDLL(cand)
             fn = lib.rc6_decode
             fn.argtypes = [
                 ctypes.c_char_p,           # source pointer (mutable buffer)
@@ -377,7 +385,7 @@ def _load_fz_key() -> Optional[List[int]]:
     for p in candidates:
         if not p.exists():
             continue
-        words = _parse_fz_key_text(p.read_text())
+        words = _parse_fz_key_text(p.read_text(encoding="utf-8", errors="replace"))
         if words is not None:
             return words
     return None
