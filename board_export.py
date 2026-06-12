@@ -1,0 +1,489 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 Thermetery Technology LLC
+
+"""BoardModel -> JSON exporter for the Android port (contract v1).
+
+Module-level functions called from Kotlin via Chaquopy (see
+docs/android_contract.md SS1-2):
+
+    open_board(path, key=None) -> str   # board JSON (no topology build)
+    load_traces() -> str                # segments/vias JSON (builds topology)
+    ping() -> str                       # native-kernel availability report
+
+Every function returns a compact JSON *string* and never raises across
+the bridge — all errors come back as the failure shape
+``{"ok": false, "error": ..., "reason": ..., "format": ...}``.
+
+IMPORTANT: this module must never import ``viewer`` (it pulls tkinter,
+which does not exist on Android). Only parser modules are imported.
+
+Coordinate / transform provenance — replicated from viewer.py:
+
+* Pin world transform (absolute pin coords): viewer.py:1720-1726
+  (``_find_pin_at``, the hit-testing path; identical math at
+  viewer.py:744-746, 1517-1522, 3025-3050)::
+
+      theta = math.radians(comp.rotation)
+      ct, st = math.cos(theta), math.sin(theta)
+      wx = comp.x + dx * ct - dy * st
+      wy = comp.y + dx * st + dy * ct
+
+  Note there is deliberately NO per-component mirror for BOTTOM-layer
+  components: in viewer.py the BOTTOM-view mirror is a *view* transform
+  applied to the whole world at projection time
+  (viewer.py:775-781 ``if (self._view_layer == "BOTTOM") ^ self._mirror_x``),
+  never baked into world coordinates. World coords here match what the
+  desktop hit-testing sees.
+
+* Component outline polygon: viewer.py:883-904
+  (``_component_polygon_world``) — shape.bbox() padded by 5 units per
+  side, 4 corners rotated by the same rotation matrix; None when the
+  shape is missing/degenerate (extent < 0.5 in both axes).
+
+* Segment layer encoding: viewer.py:3097-3121 (``_segments_arrays``) —
+  ``topo._seg_arrays["layer"]`` is a uint8 index into
+  ``topo._layer_names`` (out-of-range bytes fall back to TOP); when a
+  graph has no layer table the historical 2-layer encoding applies
+  (byte 0 = TOP, anything else = BOTTOM).
+
+* Key-prompt detection: viewer.py:5117-5135 and 5151-5197
+  (``_open_board_path`` / ``_load_with_key_prompt``) — FZKeyError from
+  the ASUS .fz path carries ``.reason`` ("missing"/"invalid"); XZZ .pcb
+  parses without raising but sets ``model.key_required`` when no valid
+  key was in play (a supplied key that fails the parity check also
+  lands here -> "invalid").
+
+* units_per_mm heuristic: viewer.py:512-534 (``units_per_mm``) —
+  component-extent span > 50,000 file units => centi-mil (3937.0 u/mm),
+  else mil (39.37 u/mm); null when there are no components to measure.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from boardview import BoardModel, FZKeyError, parse as parse_board
+
+_COMPACT = (",", ":")
+
+_EXT_FORMAT = {
+    ".cad": "gencad",
+    ".brd": "brd",
+    ".brd2": "brd",
+    ".bv": "brd",
+    ".tvw": "tvw",
+    ".fz": "fz",
+    ".pcb": "xzzpcb",
+}
+
+# ---------------------------------------------------------------------------
+# Module-global current-board state (the Kotlin shell holds one board at a
+# time; load_traces() operates on whatever open_board() last loaded).
+# ---------------------------------------------------------------------------
+
+_STATE: Dict[str, Any] = {
+    "model": None,       # BoardModel
+    "path": None,        # Path
+    "format": "?",       # meta.format string
+    "nets": None,        # List[str] — index order shipped in open_board
+    "net_index": None,   # Dict[str, int] — name -> index into nets
+}
+
+
+def _fail(error: str, reason: str, fmt: str) -> str:
+    return json.dumps(
+        {"ok": False, "error": error, "reason": str(reason), "format": fmt},
+        separators=_COMPACT,
+    )
+
+
+def _num(v) -> float:
+    """Coerce a (possibly numpy) scalar to a plain Python float."""
+    item = getattr(v, "item", None)
+    if item is not None:
+        v = item()
+    return float(v)
+
+
+def _layer_index(layer: str) -> int:
+    """Component layer -> index. TOP=0 / BOTTOM=1 always (contract SS1).
+    Component.layer is constrained to TOP/BOTTOM by the data model (see
+    viewer.py:299-310); anything unexpected falls back to TOP."""
+    return 1 if str(layer).upper() == "BOTTOM" else 0
+
+
+def _detect_format(path: Path, model: Optional[BoardModel]) -> str:
+    fmt = _EXT_FORMAT.get(path.suffix.lower(), "?")
+    if fmt == "tvw" and model is not None:
+        # The Compal/Lenovo decoder (tvw_compal.py:1049) names every
+        # shape "_compal_<master>_<refdes>"; the Gigabyte decoder uses
+        # "_tvw_..." (tvw_parser.py:813). Cheaper than re-reading the
+        # file for tvw_parser._detect_variant().
+        for name in model.shapes:
+            if name.startswith("_compal_"):
+                return "tvw-compal"
+            break  # all shapes share one prefix family; first is enough
+    return fmt
+
+
+def _units_per_mm(model: BoardModel) -> Optional[float]:
+    # Replicates viewer.py:512-534 (units_per_mm heuristic). The viewer
+    # defaults to 39.37 when there are no components; the contract wants
+    # null when the scale is not actually known, so an empty model
+    # reports null instead.
+    xs = [c.x for c in model.components.values()]
+    ys = [c.y for c in model.components.values()]
+    if not xs:
+        return None
+    span = max(max(xs) - min(xs), max(ys) - min(ys))
+    return 3937.0 if span > 50_000 else 39.37
+
+
+def _component_outline(comp, shape) -> Optional[List[List[float]]]:
+    """Absolute outline polygon — replicates viewer.py:883-904
+    (_component_polygon_world): shape bbox + 5-unit pad, 4 corners
+    rotated about the component origin. None => renderer uses bbox."""
+    if shape is None or not shape.pins:
+        return None
+    x0, y0, x1, y1 = shape.bbox()
+    if (x1 - x0) < 0.5 and (y1 - y0) < 0.5:
+        return None
+    pad = 5
+    x0 -= pad
+    y0 -= pad
+    x1 += pad
+    y1 += pad
+    corners = ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
+    theta = math.radians(_num(comp.rotation))
+    ct, st = math.cos(theta), math.sin(theta)
+    cx, cy = _num(comp.x), _num(comp.y)
+    return [[cx + rx * ct - ry * st, cy + rx * st + ry * ct]
+            for rx, ry in corners]
+
+
+# ---------------------------------------------------------------------------
+# open_board
+# ---------------------------------------------------------------------------
+
+def open_board(path: str, key: Optional[str] = None) -> str:
+    """Parse a boardview file and return the board JSON (contract SS1).
+
+    Does NOT build the trace topology — first paint stays fast; call
+    load_traces() afterwards for segments/vias."""
+    try:
+        return _open_board(path, key)
+    except Exception as exc:  # never raise across the bridge
+        fmt = "?"
+        try:
+            fmt = _EXT_FORMAT.get(Path(path).suffix.lower(), "?")
+        except Exception:
+            pass
+        return _fail("parse_error", f"{type(exc).__name__}: {exc}", fmt)
+
+
+def _open_board(path: str, key: Optional[str]) -> str:
+    p = Path(path)
+    fmt = _EXT_FORMAT.get(p.suffix.lower(), "?")
+
+    # ---- parse, mirroring viewer.py:5117-5135 (_open_board_path) ---------
+    try:
+        model = parse_board(p, key=key)
+    except FZKeyError as exc:
+        # ASUS (RC6) .fz with a missing or bad key (viewer.py:5120-5123).
+        return _fail("key_required", getattr(exc, "reason", "missing"), "fz")
+    except Exception as exc:
+        return _fail("parse_error", f"{type(exc).__name__}: {exc}", fmt)
+
+    # XZZPCB parses its cleartext sections even without a key but flags
+    # model.key_required (viewer.py:5130-5135 offers the prompt; the
+    # Android shell owns the retry loop, so we just report). A key that
+    # was supplied but failed the parity check is "invalid"
+    # (viewer.py:5183-5187), no key at all is "missing".
+    if getattr(model, "key_required", False):
+        return _fail("key_required",
+                     "invalid" if key else "missing",
+                     "xzzpcb")
+
+    fmt = _detect_format(p, model)
+
+    # ---- nets (index order is the wire-format contract) -------------------
+    nets: List[str] = list(model.signals.keys())
+    net_index: Dict[str, int] = {n: i for i, n in enumerate(nets)}
+
+    # pin -> net index, replicating viewer.py:4906-4910 (_build_pin_to_net:
+    # last assignment wins on duplicate (refdes, pin) keys).
+    pin_net: Dict[Tuple[str, str], int] = {}
+    for net_name, nodes in model.signals.items():
+        ni = net_index[net_name]
+        for refdes, pin in nodes:
+            pin_net[(refdes, pin)] = ni
+
+    # ---- components with absolute pin coords ------------------------------
+    components: List[Dict[str, Any]] = []
+    bb_minx = bb_miny = math.inf
+    bb_maxx = bb_maxy = -math.inf
+
+    for refdes, comp in model.components.items():
+        shape = model.shapes.get(comp.shape) if comp.shape else None
+        cx, cy = _num(comp.x), _num(comp.y)
+        # Pin world transform — viewer.py:1720-1726 (see module docstring).
+        theta = math.radians(_num(comp.rotation))
+        ct, st = math.cos(theta), math.sin(theta)
+
+        pins: List[Dict[str, Any]] = []
+        if shape is not None:
+            for pin_name, dx, dy in shape.pins:
+                dx = _num(dx)
+                dy = _num(dy)
+                wx = cx + dx * ct - dy * st
+                wy = cy + dx * st + dy * ct
+                pins.append({
+                    "name": str(pin_name),
+                    "x": wx,
+                    "y": wy,
+                    "net": pin_net.get((refdes, str(pin_name)), -1),
+                })
+
+        outline = _component_outline(comp, shape)
+
+        # Component bbox: prefer the outline polygon (what the desktop
+        # hit-tests against, viewer.py:914-918 _bbox_of_points over the
+        # polygon); fall back to the absolute pin extent, then to the
+        # origin point for shapeless components.
+        if outline is not None:
+            oxs = [pt[0] for pt in outline]
+            oys = [pt[1] for pt in outline]
+            cbb = [min(oxs), min(oys), max(oxs), max(oys)]
+        elif pins:
+            pxs = [pp["x"] for pp in pins]
+            pys = [pp["y"] for pp in pins]
+            cbb = [min(pxs), min(pys), max(pxs), max(pys)]
+        else:
+            cbb = [cx, cy, cx, cy]
+
+        components.append({
+            "ref": str(refdes),
+            "x": cx,
+            "y": cy,
+            "layer": _layer_index(comp.layer),
+            "rotation": _num(comp.rotation),
+            "bbox": cbb,
+            "outline": outline,
+            "pins": pins,
+        })
+
+        # meta.bbox accumulates pins + outlines (contract SS1).
+        for pp in pins:
+            px, py = pp["x"], pp["y"]
+            if px < bb_minx: bb_minx = px
+            if px > bb_maxx: bb_maxx = px
+            if py < bb_miny: bb_miny = py
+            if py > bb_maxy: bb_maxy = py
+        if outline is not None:
+            for px, py in outline:
+                if px < bb_minx: bb_minx = px
+                if px > bb_maxx: bb_maxx = px
+                if py < bb_miny: bb_miny = py
+                if py > bb_maxy: bb_maxy = py
+
+    # Board outline segments (XZZ stashes them on the model,
+    # xzzpcb_parser.py:846) also count toward the overall bounds.
+    for seg in getattr(model, "outline_segments", None) or []:
+        for px, py in seg:
+            px, py = _num(px), _num(py)
+            if px < bb_minx: bb_minx = px
+            if px > bb_maxx: bb_maxx = px
+            if py < bb_miny: bb_miny = py
+            if py > bb_maxy: bb_maxy = py
+
+    if bb_minx is math.inf:
+        bbox = [0.0, 0.0, 0.0, 0.0]
+    else:
+        bbox = [bb_minx, bb_miny, bb_maxx, bb_maxy]
+
+    out = {
+        "ok": True,
+        "version": 1,
+        "meta": {
+            "title": p.stem,
+            "format": fmt,
+            "warnings": [str(w) for w in (getattr(model, "warnings", None) or [])],
+            "units_per_mm": _units_per_mm(model),
+            "bbox": bbox,
+            "traces_available": bool(model.topology_available),
+        },
+        "layers": ["TOP", "BOTTOM"],
+        "nets": nets,
+        "components": components,
+    }
+
+    _STATE["model"] = model
+    _STATE["path"] = p
+    _STATE["format"] = fmt
+    _STATE["nets"] = nets
+    _STATE["net_index"] = net_index
+
+    return json.dumps(out, separators=_COMPACT)
+
+
+# ---------------------------------------------------------------------------
+# load_traces
+# ---------------------------------------------------------------------------
+
+def load_traces() -> str:
+    """Build (or fetch the cached) trace topology for the current board
+    and return the traces JSON (contract SS1). TVW builds take seconds —
+    the shell calls this off the UI thread."""
+    try:
+        return _load_traces()
+    except Exception as exc:  # never raise across the bridge
+        return _fail("parse_error", f"{type(exc).__name__}: {exc}",
+                     _STATE.get("format", "?"))
+
+
+def _load_traces() -> str:
+    model: Optional[BoardModel] = _STATE.get("model")
+    fmt = _STATE.get("format", "?")
+    if model is None:
+        return _fail("parse_error", "no board loaded (call open_board first)",
+                     fmt)
+    if not model.topology_available:
+        return _fail("parse_error", "no trace topology available for this board",
+                     fmt)
+
+    topo = model.topology  # triggers the build / cache load
+    net_index: Dict[str, int] = _STATE["net_index"] or {}
+
+    # Map topology net_id -> open_board nets index, by NAME (the topology
+    # keeps its own net table; open_board's `nets` order is the wire
+    # contract). Unknown / unnamed nets -> -1.
+    topo_net_names = list(getattr(topo, "net_names", []) or [])
+    net_map: List[int] = [net_index.get(n, -1) for n in topo_net_names]
+    n_net_map = len(net_map)
+
+    # Output layer table: TOP=0 / BOTTOM=1 always; inner layers appended
+    # from the topology's own table (contract SS1: layers list REPLACES
+    # the open_board one and must be a superset).
+    out_layers: List[str] = ["TOP", "BOTTOM"]
+
+    seg_x1: List[float] = []
+    seg_y1: List[float] = []
+    seg_x2: List[float] = []
+    seg_y2: List[float] = []
+    seg_layer: List[int] = []
+    seg_net: List[int] = []
+    seg_width: List[float] = []
+
+    seg_arr = getattr(topo, "_seg_arrays", None)
+    layer_names = list(getattr(topo, "_layer_names", []) or [])
+
+    if seg_arr is not None:
+        # Numpy fast path — replicates viewer.py:3097-3121
+        # (_segments_arrays): `layer` is a uint8 index into
+        # `topo._layer_names`; out-of-range bytes fall back to TOP; a
+        # graph with no layer table uses the historical 2-layer
+        # encoding (byte 0 = TOP, anything else = BOTTOM).
+        seg_x1 = seg_arr["x1"].tolist()
+        seg_y1 = seg_arr["y1"].tolist()
+        seg_x2 = seg_arr["x2"].tolist()
+        seg_y2 = seg_arr["y2"].tolist()
+        layer_bytes = seg_arr["layer"].tolist()
+        if layer_names:
+            byte_to_out: List[int] = []
+            for name in layer_names:
+                if name == "TOP":
+                    byte_to_out.append(0)
+                elif name == "BOTTOM":
+                    byte_to_out.append(1)
+                else:
+                    if name not in out_layers:
+                        out_layers.append(name)
+                    byte_to_out.append(out_layers.index(name))
+            n_names = len(byte_to_out)
+            seg_layer = [byte_to_out[b] if 0 <= b < n_names else 0
+                         for b in layer_bytes]
+        else:
+            seg_layer = [0 if b == 0 else 1 for b in layer_bytes]
+        seg_net = [net_map[t] if 0 <= t < n_net_map else -1
+                   for t in seg_arr["net_id"].tolist()]
+        width_arr = seg_arr.get("width")
+        if width_arr is not None:
+            seg_width = width_arr.tolist()
+        else:
+            seg_width = [0] * len(seg_x1)
+    else:
+        # Legacy dataclass path (viewer.py:3123-3138): seg.layer is the
+        # layer NAME string here.
+        name_to_out: Dict[str, int] = {"TOP": 0, "BOTTOM": 1}
+        for seg in topo.segments:
+            seg_x1.append(_num(seg.x1))
+            seg_y1.append(_num(seg.y1))
+            seg_x2.append(_num(seg.x2))
+            seg_y2.append(_num(seg.y2))
+            lname = str(seg.layer)
+            li = name_to_out.get(lname)
+            if li is None:
+                out_layers.append(lname)
+                li = len(out_layers) - 1
+                name_to_out[lname] = li
+            seg_layer.append(li)
+            tid = int(seg.net_id)
+            seg_net.append(net_map[tid] if 0 <= tid < n_net_map else -1)
+            seg_width.append(_num(getattr(seg, "width", 0)))
+
+    # Vias (tvw_topology.Via records; synthetic ratsnest has none).
+    via_x: List[float] = []
+    via_y: List[float] = []
+    via_net: List[int] = []
+    for v in getattr(topo, "vias", None) or []:
+        via_x.append(_num(v.x))
+        via_y.append(_num(v.y))
+        tid = int(v.net_id)
+        via_net.append(net_map[tid] if 0 <= tid < n_net_map else -1)
+
+    out = {
+        "ok": True,
+        "synthetic": bool(getattr(topo, "is_synthetic", False)),
+        "layers": out_layers,
+        "segments": {
+            "x1": seg_x1, "y1": seg_y1, "x2": seg_x2, "y2": seg_y2,
+            "layer": seg_layer,
+            "net": seg_net,
+            "width": seg_width,
+        },
+        "vias": {"x": via_x, "y": via_y, "net": via_net},
+    }
+    return json.dumps(out, separators=_COMPACT)
+
+
+# ---------------------------------------------------------------------------
+# ping
+# ---------------------------------------------------------------------------
+
+def ping() -> str:
+    """Report whether each native kernel loaded (contract SS2). The shell
+    logs this at startup to prove the jniLibs / bare-soname loader path
+    works on-device."""
+    tvw = xzz = rc6 = False
+    try:
+        import tvw_native
+        tvw = bool(tvw_native.available())
+    except Exception:
+        pass
+    try:
+        import xzz_native
+        xzz = bool(xzz_native.available())
+    except Exception:
+        pass
+    try:
+        from fz_parser import _load_native_rc6
+        rc6 = _load_native_rc6() is not None
+    except Exception:
+        pass
+    return json.dumps(
+        {"ok": True, "native": {"tvw": tvw, "xzz": xzz, "rc6": rc6}},
+        separators=_COMPACT,
+    )

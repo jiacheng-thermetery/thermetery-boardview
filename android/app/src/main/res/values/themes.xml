@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Framework Material dark theme: no AppCompat/Material-Components
+         dependency needed; AlertDialog and EditText pick up the dark style. -->
+    <style name="Theme.Boardview" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/board_background</item>
+        <item name="android:statusBarColor">@color/board_background</item>
+        <item name="android:navigationBarColor">@color/board_background</item>
+        <item name="android:colorPrimary">@color/pcb_green</item>
+        <item name="android:colorPrimaryDark">@color/board_background</item>
+        <item name="android:colorAccent">@color/pcb_accent</item>
+    </style>
+</resources>

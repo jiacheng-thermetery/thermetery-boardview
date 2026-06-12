@@ -43,3 +43,10 @@ private/
 *.fz
 *.pcb
 *.pdf
+
+# Android exporter scratch dir — local sample JSON for the JS renderer
+# dev harness (exported from proprietary boardviews; never commit).
+_android_samples/
+
+# Renderer verification screenshots (local emulator/headless captures).
+_renderer_shots/

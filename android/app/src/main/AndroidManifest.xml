@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- allowBackup=false: remembered decryption keys live in filesDir/keys/
+         and must never end up in a cloud backup (contract §6). -->
+    <application
+        android:name=".BoardviewApplication"
+        android:allowBackup="false"
+        android:hardwareAccelerated="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Boardview">
+
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|density|uiMode"
+            android:exported="true"
+            android:launchMode="singleTask">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Board files opened from file managers (contract §6):
+                 .tvw .fz .pcb .cad .brd .brd2 .bv
+                 pathPattern globs are non-greedy, so each extension gets
+                 extra-dot variants to match names like "rev1.01.tvw". -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="file" />
+                <data android:scheme="content" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <data android:pathPattern=".*\\.tvw" />
+                <data android:pathPattern=".*\\..*\\.tvw" />
+                <data android:pathPattern=".*\\..*\\..*\\.tvw" />
+                <data android:pathPattern=".*\\.fz" />
+                <data android:pathPattern=".*\\..*\\.fz" />
+                <data android:pathPattern=".*\\..*\\..*\\.fz" />
+                <data android:pathPattern=".*\\.pcb" />
+                <data android:pathPattern=".*\\..*\\.pcb" />
+                <data android:pathPattern=".*\\..*\\..*\\.pcb" />
+                <data android:pathPattern=".*\\.cad" />
+                <data android:pathPattern=".*\\..*\\.cad" />
+                <data android:pathPattern=".*\\..*\\..*\\.cad" />
+                <data android:pathPattern=".*\\.brd" />
+                <data android:pathPattern=".*\\..*\\.brd" />
+                <data android:pathPattern=".*\\..*\\..*\\.brd" />
+                <data android:pathPattern=".*\\.brd2" />
+                <data android:pathPattern=".*\\..*\\.brd2" />
+                <data android:pathPattern=".*\\..*\\..*\\.brd2" />
+                <data android:pathPattern=".*\\.bv" />
+                <data android:pathPattern=".*\\..*\\.bv" />
+                <data android:pathPattern=".*\\..*\\..*\\.bv" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

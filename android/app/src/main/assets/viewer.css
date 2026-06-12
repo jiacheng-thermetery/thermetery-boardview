@@ -1,0 +1,330 @@
+/* Thermetery boardview — Android WebView renderer styles.
+   Dark theme matching viewer.py (BG #0d1024). No external fonts/resources. */
+
+:root {
+  --bg: #0d1024;
+  --bar-bg: rgba(18, 22, 48, 0.92);
+  --bar-border: #2a3052;
+  --fg: #c8cdf0;
+  --fg-dim: #aaaadd;
+  --accent: #22ddee;
+  --highlight: #ffe45b;
+  --danger: #ff7b9c;
+  --mono: "Cascadia Mono", Consolas, "Roboto Mono", monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "Segoe UI", Roboto, system-ui, sans-serif;
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#bv-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;   /* we do our own pan/pinch */
+  background: var(--bg);
+}
+
+.hidden { display: none !important; }
+
+/* ---------- toolbar ---------- */
+
+#bv-toolbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: calc(6px + env(safe-area-inset-top, 0px)) 8px 6px 8px;
+  background: var(--bar-bg);
+  border-bottom: 1px solid var(--bar-border);
+  z-index: 20;
+}
+
+#bv-toolbar button {
+  flex: 0 0 auto;
+  min-width: 52px;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--bar-border);
+  border-radius: 6px;
+  background: #1a2040;
+  color: var(--fg);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#bv-toolbar button:active { background: #2a3460; }
+
+#bv-toolbar button.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+#bv-toolbar button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+#bv-search {
+  flex: 1 1 60px;
+  min-width: 60px;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--bar-border);
+  border-radius: 6px;
+  background: #131736;
+  color: var(--fg);
+  font-size: 13px;
+  font-family: var(--mono);
+  outline: none;
+}
+
+#bv-search:focus { border-color: var(--accent); }
+
+/* ---------- net highlight chip ---------- */
+
+#bv-netchip {
+  position: fixed;
+  top: calc(54px + env(safe-area-inset-top, 0px));
+  left: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 10px;
+  background: var(--bar-bg);
+  border: 1px solid var(--highlight);
+  border-radius: 16px;
+  z-index: 19;
+  font-family: var(--mono);
+  font-size: 12px;
+  max-width: 70vw;
+}
+
+#bv-netchip-dot { color: var(--highlight); }
+
+#bv-netchip-name {
+  color: var(--highlight);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#bv-netchip-clear {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 11px;
+  background: #2a3052;
+  color: var(--fg);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+/* ---------- selection info panel (slides from bottom) ---------- */
+
+#bv-panel {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-height: 42vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bar-bg);
+  border-top: 1px solid var(--bar-border);
+  border-radius: 14px 14px 0 0;
+  z-index: 21;
+  transform: translateY(105%);
+  transition: transform 0.22s ease-out;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  box-shadow: 0 -4px 18px rgba(0, 0, 0, 0.5);
+}
+
+#bv-panel.open { transform: translateY(0); }
+
+#bv-panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 12px 8px 14px;
+  border-bottom: 1px solid var(--bar-border);
+}
+
+#bv-panel-ref {
+  font-family: var(--mono);
+  font-size: 17px;
+  font-weight: bold;
+  color: var(--accent);
+}
+
+#bv-panel-meta {
+  flex: 1 1 auto;
+  font-size: 12px;
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#bv-panel-close {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 15px;
+  background: #2a3052;
+  color: var(--fg);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#bv-panel-pins {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.bv-pinrow {
+  display: flex;
+  gap: 12px;
+  padding: 7px 14px;
+  border-bottom: 1px solid rgba(42, 48, 82, 0.5);
+  cursor: pointer;
+}
+
+.bv-pinrow:active { background: #1a2040; }
+
+.bv-pinrow.sel { background: #16224a; }
+
+.bv-pinrow.hl .bv-pinnet { color: var(--highlight); }
+
+.bv-pinname {
+  flex: 0 0 64px;
+  color: #ffff88;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bv-pinnet {
+  flex: 1 1 auto;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bv-pinnet.none { color: #555a80; }
+
+/* ---------- status line (bottom-left) ---------- */
+
+#bv-status {
+  position: fixed;
+  left: 8px;
+  bottom: calc(6px + env(safe-area-inset-bottom, 0px));
+  z-index: 18;
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--fg-dim);
+  text-shadow: 0 1px 2px #000;
+  pointer-events: none;
+  max-width: 90vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- error toast ---------- */
+
+#bv-toast {
+  position: fixed;
+  top: calc(58px + env(safe-area-inset-top, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 86vw;
+  padding: 9px 16px;
+  background: #3a1020;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  color: #ffd0dc;
+  font-size: 13px;
+  z-index: 30;
+  opacity: 0;
+  transition: opacity 0.25s;
+  pointer-events: none;
+}
+
+#bv-toast.show { opacity: 1; }
+
+/* ---------- dev harness (desktop browser only) ---------- */
+
+#bv-dev {
+  position: fixed;
+  right: 8px;
+  bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  z-index: 22;
+}
+
+#bv-dev-filelabel {
+  display: inline-block;
+  padding: 6px 12px;
+  border: 1px dashed var(--bar-border);
+  border-radius: 6px;
+  background: rgba(26, 32, 64, 0.85);
+  color: var(--fg-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+#bv-dev-file { display: none; }
+
+#bv-drophint {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(13, 16, 36, 0.8);
+  border: 3px dashed var(--accent);
+  color: var(--accent);
+  font-size: 22px;
+  z-index: 40;
+  pointer-events: none;
+}
+
+#bv-errlog {
+  position: fixed;
+  top: calc(48px + env(safe-area-inset-top, 0px));
+  left: 0;
+  right: 0;
+  max-height: 30vh;
+  overflow-y: auto;
+  background: rgba(40, 8, 16, 0.92);
+  color: #ff9aac;
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 6px 10px;
+  z-index: 50;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
