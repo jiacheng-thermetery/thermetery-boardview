@@ -115,7 +115,7 @@ def _load_native_rc6():
     else:
         names = ["rc6_native.so", "librc6_native.so"]
     for n in names:
-        p = here / n
+        p = here / 'native' / n
         if not p.exists():
             continue
         try:

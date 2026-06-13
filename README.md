@@ -23,7 +23,7 @@ repo.
 | Allegro Extracta `.fz`      | `.fz`                     | binary; ASRock = zlib-only, ASUS = RC6+zlib (needs an FZKey at `private/fz_key.txt`) |
 | XZZPCB (MSI / repair shops) | `.pcb`                    | binary, DES-encrypted; needs an XZZ key (see THIRD_PARTY_NOTICES.md) |
 
-The loader (`boardview.py`) dispatches by extension and content sniff.
+The loader (`src/parsers/boardview.py`) dispatches by extension and content sniff.
 For the TVW binary format see [TVW_FORMAT.md](TVW_FORMAT.md) /
 [TVW_FORMAT.html](TVW_FORMAT.html) — a working spec covering the file
 macro layout, coordinate system, master-footprint pin-position decoder,
@@ -41,7 +41,7 @@ missing you can still supply the key:
   then offers to save it to `private/` for next time (opt-in; `private/` is
   gitignored).
 - **Environment** — set `FZ_KEY` or `XZZPCB_KEY`.
-- **CLI** — `python viewer.py board.fz --key "<key>"`.
+- **CLI** — `python -m src.viewer board.fz --key "<key>"`.
 
 Without a key, XZZ boards still load their cleartext outline + test pads;
 an ASUS `.fz` cannot open at all (its whole body is encrypted).
@@ -63,11 +63,15 @@ pip install -r requirements.txt
 ## Running
 
 ```
-python viewer.py                         # opens a file picker
-python viewer.py path/to/board.tvw       # loads directly
+python -m src.viewer                     # opens a file picker
+python -m src.viewer path/to/board.tvw   # loads directly
 ```
 
-`python viewer.py --smoke-test` does a headless import/launch check.
+`python -m src.viewer --smoke-test` does a headless import/launch check.
+
+> **Note:** The project uses a [src layout](https://packaging.python.org/en/latest/discussions/src-layout-vs-flat-layout/),
+> so you must run modules as packages (`python -m src.<module>`). Do not run
+> files directly from inside `src/` — relative imports will fail.
 
 ## Controls
 
@@ -95,9 +99,9 @@ When viewing an inner copper layer, TOP/BOTTOM components render as
 faint ghost outlines so you keep spatial context without losing the
 layer you're inspecting.
 
-**Native-DLL preflight** — on launch the viewer probes the three native
-fast-path DLLs and prints a one-time stderr warning (with per-format
-slowdown and the build command) for any that are missing, so a fresh
+**Native library preflight** — on launch the viewer probes the three native
+fast-path shared libraries and prints a one-time stderr warning (with per-format
+slowdown and the meson build command) for any that are missing, so a fresh
 checkout that forgot to compile them is obvious before you open a board.
 
 ## Renderer tiers
@@ -119,55 +123,68 @@ tier at startup:
 
 ## Native fast paths
 
-Three optional C extensions accelerate cold-load. Each has a pure-Python
+Three optional C shared libraries accelerate cold-load. Each has a pure-Python
 fallback in its `.py` wrapper, so the viewer works without compiling
 anything (you just wait longer):
 
-| DLL              | Speeds up                    | Penalty when absent              |
-| ---------------- | ---------------------------- | -------------------------------- |
-| `tvw_native.dll` | TVW pad/poly/net scanners    | +1–2 s per `.tvw`                |
-| `xzz_native.dll` | XZZPCB DES decryption        | +30–60 s per `.pcb` (~100× hit)  |
-| `rc6_native.dll` | ASUS `.fz` RC6 decryption    | +6 s per ASUS `.fz`              |
+| Library              | Speeds up                    | Penalty when absent              |
+| ---------------------| ---------------------------- | -------------------------------- |
+| `tvw_native`          | TVW pad/poly/net scanners    | +1–2 s per `.tvw`                |
+| `xzz_native`          | XZZPCB DES decryption        | +30–60 s per `.pcb` (~100× hit)  |
+| `rc6_native`          | ASUS `.fz` RC6 decryption    | +6 s per ASUS `.fz`              |
 
-Build scripts (`build_*.bat`) compile each `.c` against MinGW-w64 GCC;
-the exact invocation is in each `.c` file's header. Decrypted plaintext
-(XZZPCB / ASUS FZ) is never written to disk — caching proprietary file
-contents is an IP/leakage hazard.
+### Building
+
+The project uses [Meson](https://mesonbuild.com/) to compile the C sources.
+Install Meson and a C compiler (gcc/clang), then:
+
+```
+meson setup build && meson compile -C build
+```
+
+This produces the shared libraries in `build/parsers/` and copies them into
+`src/parsers/native/`. On Windows the output is `.dll`; on macOS `.dylib`;
+on Linux `.so`. The viewer/walker auto-detect the platform extension and
+warn at launch if any library is missing.
+
+> **Note:** Decrypted plaintext (XZZPCB / ASUS FZ) is never written to disk —
+> caching proprietary file contents is an IP/leakage hazard.
 
 ## Layout
 
 ```
 # Core (shared by the viewer and the experimental walker)
-boardview.py              unified loader — extension dispatch + content sniff
-gencad_parser.py          .cad  → BoardModel
-brd_parser.py             .brd / .brd2 / .bv  → BoardModel
-fz_parser.py              .fz (Allegro Extracta)  → BoardModel  (RC6 pieces MIT)
-xzzpcb_parser.py          .pcb (XZZPCB V1.0)  → BoardModel  (port of XZZPCBFile.cpp + dhuertas/DES, MIT)
-tvw_parser.py             .tvw  → BoardModel; variant dispatch (Gigabyte vs Compal/Lenovo)
-tvw_compal.py             Compal/Lenovo TVW decoder (chip enumeration, pin↔net, connectors)
-tvw_master_fp.py          TVW master-footprint pin-position decoder
-tvw_topology.py           TVW trace topology graph (segments + polylines)
-tvw_seg_27_unified_v3.py  TVW polyline / chain block scanner
-ratsnest.py               synthetic ratsnest topology (when no trace geometry)
-rc6_native.{c,dll}        optional C fast-path for RC6 (ASUS .fz)
-xzz_native.{c,dll,py}     optional C fast-path for DES (XZZPCB)
-tvw_native.{c,dll,py}     optional C fast-path for TVW scanners
+src/parsers/boardview.py              unified loader — extension dispatch + content sniff
+src/parsers/gencad_parser.py          .cad  → BoardModel
+src/parsers/brd_parser.py             .brd / .brd2 / .bv  → BoardModel
+src/parsers/fz_parser.py              .fz (Allegro Extracta)  → BoardModel  (RC6 pieces MIT)
+src/parsers/xzzpcb_parser.py          .pcb (XZZPCB V1.0)  → BoardModel  (port of XZZPCBFile.cpp + dhuertas/DES, MIT)
+src/parsers/tvw_parser.py             .tvw  → BoardModel; variant dispatch (Gigabyte vs Compal/Lenovo)
+src/parsers/tvw_compal.py             Compal/Lenovo TVW decoder (chip enumeration, pin↔net, connectors)
+src/parsers/tvw_master_fp.py          TVW master-footprint pin-position decoder
+src/parsers/tvw_topology.py           TVW trace topology graph (segments + polylines)
+src/parsers/tvw_seg_27_unified_v3.py  TVW polyline / chain block scanner
+src/ratsnest.py                       synthetic ratsnest topology (when no trace geometry)
+src/parsers/native/rc6_native.c       optional C fast-path for RC6 (ASUS .fz)
+src/parsers/native/xzz_native.c       optional C fast-path for DES (XZZPCB)
+src/parsers/native/tvw_native.c       optional C fast-path for TVW scanners
 
-# Viewer
-viewer.py                 Tk app + board canvas (CPU + GL tiers), drag-drop, DLL preflight
+# Viewer / walker (entry points — run as `python -m src.<module>`)
+src/viewer.py                 Tk app + board canvas (CPU + GL tiers), drag-drop, library preflight
+src/walker.py                 diagnostic walk app (canvas + chat + walk-step engine)
+src/linker.py                 rules YAML × BoardModel → linked probe instructions
+src/signal_match.py           fuzzy signal-name matcher
+src/schematic_text.py         schematic PDF → per-page signal index
+src/convert_rules.py          .xlsx → rules.yaml converter
+src/*_probe.py / *_test.py    CLI probes and test drivers
 
-# Experimental walker (work in progress — see bottom)
-walker.py                 diagnostic walk app (canvas + chat + walk-step engine)
-linker.py                 rules YAML × BoardModel → linked probe instructions
-signal_match.py           fuzzy signal-name matcher
-schematic_text.py         schematic PDF → per-page signal index
-convert_rules.py          .xlsx → rules.yaml converter
-*_probe.py / *_test.py    CLI probes and test drivers
+# Build
+meson.build                   Meson build definition for native C libraries
 
 # Docs / licensing
-TVW_FORMAT.md / .html     Teboview binary format spec
-THIRD_PARTY_NOTICES.md    MIT attributions (OpenBoardView, dhuertas/DES, inflex/teboviewformat)
-LICENSES/                 verbatim license texts for embedded MIT code
+TVW_FORMAT.md / .html         Teboview binary format spec
+THIRD_PARTY_NOTICES.md        MIT attributions (OpenBoardView, dhuertas/DES, inflex/teboviewformat)
+LICENSES/                     verbatim license texts for embedded MIT code
 ```
 
 ## Status
@@ -236,9 +253,9 @@ into context.
 
 ```
 pip install -r requirements-walker.txt
-python walker.py                                   # blank window; drag a board in
-python walker.py path/to/board.cad                 # opens a board; pick rules from the menu
-python walker.py rules.yaml board.cad <platform>   # full triple
+python -m src.walker                                   # blank window; drag a board in
+python -m src.walker path/to/board.cad                 # opens a board; pick rules from the menu
+python -m src.walker rules.yaml board.cad <platform>   # full triple
 ```
 
 The rules YAML is user-supplied (not bundled), structured roughly:

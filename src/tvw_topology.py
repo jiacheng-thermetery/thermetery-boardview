@@ -320,7 +320,7 @@ def _scan_pads_stride_aware(
     """
     # Native fast path — ~60× speedup. See tvw_native.c.
     try:
-        from tvw_native import scan_pads_stride_aware as _nat_scan_pads
+        from .parsers.tvw_native import scan_pads_stride_aware as _nat_scan_pads
         result = _nat_scan_pads(buf, region_start, region_end,
                                 min_run=3, coord_max=2_000_000)
         if result is not None:
@@ -1338,7 +1338,7 @@ class TraceGraph:
         the legacy list-of-tuples path which iterates self.pads etc.
         """
         try:
-            from tvw_native import build_topology, build_topology_arrays
+            from .parsers.tvw_native import build_topology, build_topology_arrays
         except Exception:
             return False
 

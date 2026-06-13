@@ -27,7 +27,7 @@ rc6_native_lib = shared_library(
   install : false,
 )
 
-py = find_program('python')
+py = find_program('python3')
 native_dir = meson.project_source_root() / 'src' / 'parsers' / 'native'
 
 copy_tvw = custom_target(

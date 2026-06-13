@@ -287,7 +287,7 @@ def _des_decrypt_buf(buf: bytes, key: int) -> bytes:
     do NOT cache decrypted results to disk — the plaintext is the
     proprietary file's content, and a cache file leaks that content."""
     try:
-        from xzz_native import decrypt as _native_decrypt
+        from .xzz_native import decrypt as _native_decrypt
         native = _native_decrypt(buf, key)
         if native is not None:
             return native
