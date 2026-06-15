@@ -27,6 +27,12 @@ rc6_native_lib = shared_library(
   install : false,
 )
 
+# the following is hacky and intended to maintain functionallyity  
+# closer to the original setup with just a script to compile
+# it should be reworked such that the python load fetches 
+# from the build folder for development, and somewhere else
+# for release
+
 py = find_program('python3')
 native_dir = meson.project_source_root() / 'src' / 'parsers' / 'native'
 

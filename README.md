@@ -63,11 +63,16 @@ pip install -r requirements.txt
 ## Running
 
 ```
+pip install -r requirements.txt          # optional GPU renderer deps
+
 python -m src.viewer                     # opens a file picker
 python -m src.viewer path/to/board.tvw   # loads directly
+python -m src.viewer --smoke-test        # headless import/launch check
 ```
 
-`python -m src.viewer --smoke-test` does a headless import/launch check.
+> **Note:** The project uses a [src layout](https://packaging.python.org/en/latest/discussions/src-layout-vs-flat-layout/),
+> so you must run modules as packages (`python -m src.<module>`). Do not run
+> files directly from inside `src/` — relative imports will fail.
 
 > **Note:** The project uses a [src layout](https://packaging.python.org/en/latest/discussions/src-layout-vs-flat-layout/),
 > so you must run modules as packages (`python -m src.<module>`). Do not run
@@ -138,8 +143,10 @@ anything (you just wait longer):
 The project uses [Meson](https://mesonbuild.com/) to compile the C sources.
 Install Meson and a C compiler (gcc/clang), then:
 
-```
-meson setup build && meson compile -C build
+```bash
+pip install meson ninja                    # or: pip install -r requirements.txt
+meson setup build                         # configure
+ninja -C build                            # compile (or: meson compile -C build)
 ```
 
 This produces the shared libraries in `build/parsers/` and copies them into
