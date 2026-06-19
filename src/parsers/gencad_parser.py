@@ -47,7 +47,7 @@ _PadView = namedtuple("_PadView", "pad_id x y net_id layer")
 # real classes. This costs no time when nobody touches those names.
 def __getattr__(name: str):  # PEP 562 module-level __getattr__
     if name in ("TraceGraph", "Pad", "Segment", "Polyline"):
-        from tvw_topology import (  # local import — breaks the cycle
+        from ..tvw_topology import (  # local import — breaks the cycle
             TraceGraph, Pad, Segment, Polyline,
         )
         # Cache on the module so subsequent lookups skip the import.
@@ -262,7 +262,7 @@ class BoardModel:
             self._topology = self._topology_loader()
             return self._topology
         if self.signals:
-            from ratsnest import build_synthetic_topology
+            from ..ratsnest import build_synthetic_topology
             self._topology = build_synthetic_topology(self)
             return self._topology
         raise RuntimeError(
@@ -318,7 +318,7 @@ class BoardModel:
         # We OR the parser regex in too so any name the parser flags
         # as power is also skipped here.
         try:
-            from tvw_parser import _POWER_NET_RE
+            from .tvw_parser import _POWER_NET_RE
         except Exception:
             _POWER_NET_RE = _re.compile(r"^$")  # never matches
 
@@ -761,7 +761,7 @@ def _make_gencad_topology_loader(
     """
     def _build() -> Any:
         # Local import to avoid the module-load cycle (see __getattr__).
-        from tvw_topology import TraceGraph, Pad, Segment
+        from ..tvw_topology import TraceGraph, Pad, Segment
 
         # GENCAD coordinates are float user-units (typically mils, given
         # `UNITS USER 1000` = 1000 user-units per inch). The canvas

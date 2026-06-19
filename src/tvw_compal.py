@@ -328,7 +328,7 @@ def _scan_cap_section_layers(data: bytes) -> Dict[str, int]:
     # (Gigabyte: layer byte at +9; Compal: layer byte at +20 past a
     # leading 11-char "SE...T" / "SGA...T" / "SH...T" part code), and
     # we use the Compal offset here.
-    from tvw_parser import _find_chip_headers, _decode_refdes
+    from .parsers.tvw_parser import _find_chip_headers, _decode_refdes
     chips = _find_chip_headers(data)
     out: Dict[str, int] = {}
     for c in chips:

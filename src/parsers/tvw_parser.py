@@ -626,7 +626,7 @@ def _parse_compal(path: Path) -> BoardModel:
     Gigabyte-only callers, and means a broken tvw_compal.py can't crash
     the Gigabyte path during module load.
     """
-    from tvw_compal import parse as parse_compal
+    from ..tvw_compal import parse as parse_compal
     return parse_compal(path)
 
 
@@ -823,7 +823,7 @@ def _parse_gigabyte(path: Path) -> BoardModel:
     tvw_path = Path(path)
 
     def _build_topology():
-        from tvw_topology import TraceGraph  # local import — see above
+        from ..tvw_topology import TraceGraph  # local import — see above
         return TraceGraph.from_file(str(tvw_path))
 
     model._topology_loader = _build_topology

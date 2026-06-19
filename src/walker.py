@@ -6758,7 +6758,7 @@ class WalkerApp(tk.Tk):
         if self._schematic_match_idx is None or self._schematic_text_idx is None:
             return ""
         try:
-            from signal_match import find_signal_candidates
+            from .signal_match import find_signal_candidates
         except Exception:
             return ""
 
@@ -6807,8 +6807,8 @@ class WalkerApp(tk.Tk):
         self._schematic_text_idx = None
         self._schematic_match_idx = None
         try:
-            from schematic_text import extract_index
-            from signal_match import build_match_index
+            from .schematic_text import extract_index
+            from .signal_match import build_match_index
         except Exception:
             traceback.print_exc()
             return
