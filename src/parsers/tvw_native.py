@@ -93,7 +93,7 @@ def _load() -> Optional[ctypes.CDLL]:
     else:
         names = ["tvw_native.so", "libtvw_native.so"]
     for n in names:
-        p = here / n
+        p = here / 'native' / n
         if not p.exists():
             continue
         try:

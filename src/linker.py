@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from boardview import BoardModel, parse
+from .parsers.boardview import BoardModel, parse
 
 
 _NET_NAME_RE = re.compile(r"^[A-Za-z0-9_#/+\-]+$")
@@ -205,7 +205,7 @@ def _get_board_match_index(board: BoardModel):
     if idx is not None:
         return idx
     try:
-        from signal_match import build_match_index
+        from .signal_match import build_match_index
     except Exception:
         return None
     idx = build_match_index(board.signals.keys())
@@ -224,7 +224,7 @@ def _signal_match_resolve(
     `min_confidence`, else None. Used as the last-resort fallback in
     `_resolve_to_board`."""
     try:
-        from signal_match import find_signal_candidates
+        from .signal_match import find_signal_candidates
     except Exception:
         return None
     idx = _get_board_match_index(board)

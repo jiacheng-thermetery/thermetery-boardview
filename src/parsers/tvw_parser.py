@@ -68,8 +68,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from gencad_parser import BoardModel, Component, Shape
-from tvw_master_fp import parse_master_footprints, pins_world_positions
+from .gencad_parser import BoardModel, Component, Shape
+from .tvw_master_fp import parse_master_footprints, pins_world_positions
 
 
 # --------------------------------------------------------------------------
@@ -340,7 +340,7 @@ def _find_net_table(buf: bytes) -> Tuple[int, int]:
     # that runs ~100× faster. Falls through to Python below if the DLL
     # isn't available.
     try:
-        from tvw_native import find_net_table as _nat_find_net_table
+        from .tvw_native import find_net_table as _nat_find_net_table
         result = _nat_find_net_table(buf)
         if result is not None:
             return result
@@ -431,7 +431,7 @@ def _find_pad_runs(
     """
     # Native fast path — ~60× speedup. See tvw_native.c.
     try:
-        from tvw_native import find_pad_runs as _nat_find_pad_runs
+        from .tvw_native import find_pad_runs as _nat_find_pad_runs
         result = _nat_find_pad_runs(buf, min_run=min_run)
         if result is not None:
             return result

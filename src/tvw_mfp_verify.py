@@ -14,15 +14,13 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-sys.path.insert(0, "C:/Claude Code")
-
-from tvw_parser import (  # type: ignore
+from .parsers.tvw_parser import (  # type: ignore
     _decode_position,
     _extract_pads,
     _find_chip_headers,
     _find_pad_runs,
 )
-from tvw_master_fp import (
+from .parsers.tvw_master_fp import (
     parse_master_footprints,
     pins_world_positions,
 )

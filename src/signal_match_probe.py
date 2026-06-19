@@ -28,8 +28,8 @@ from typing import Iterable, List, Set, Tuple
 
 import yaml
 
-from schematic_text import extract_index, SchematicIndex
-from signal_match import (
+from .schematic_text import extract_index, SchematicIndex
+from .signal_match import (
     MatchCandidate,
     build_match_index,
     find_signal_candidates,

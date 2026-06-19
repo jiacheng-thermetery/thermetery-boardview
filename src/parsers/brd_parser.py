@@ -48,7 +48,7 @@ Pin names are not stored in the file, so we use sequential "1", "2",
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from gencad_parser import BoardModel, Component, Shape
+from .gencad_parser import BoardModel, Component, Shape
 
 
 def parse(path: Path) -> BoardModel:

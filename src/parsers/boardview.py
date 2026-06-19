@@ -29,13 +29,13 @@ have one consistent surface.
 from pathlib import Path
 from typing import Union
 
-from gencad_parser import BoardModel, Component, Shape
-from gencad_parser import parse as _parse_gencad
-from brd_parser import parse as _parse_brd
-from tvw_parser import parse as _parse_tvw
-from fz_parser import parse as _parse_fz, FZKeyError
-from xzzpcb_parser import parse as _parse_xzzpcb
-from xzzpcb_parser import verify_format as _verify_xzzpcb
+from .gencad_parser import BoardModel, Component, Shape
+from .gencad_parser import parse as _parse_gencad
+from .brd_parser import parse as _parse_brd
+from .tvw_parser import parse as _parse_tvw
+from .fz_parser import parse as _parse_fz, FZKeyError
+from .xzzpcb_parser import parse as _parse_xzzpcb
+from .xzzpcb_parser import verify_format as _verify_xzzpcb
 
 PathLike = Union[str, Path]
 

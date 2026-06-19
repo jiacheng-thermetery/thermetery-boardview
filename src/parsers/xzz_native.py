@@ -45,7 +45,7 @@ def _load() -> Optional[ctypes.CDLL]:
 
     here = Path(__file__).resolve().parent
     for name in _candidate_names():
-        path = here / name
+        path = here / 'native' / name
         if not path.exists():
             continue
         try:

@@ -15,3 +15,8 @@ skia-python>=87.6
 pyopengltk>=0.0.4
 PyOpenGL>=3.1
 tkinterdnd2>=0.4
+
+# Native C library build system (optional, speeds up cold loads):
+#   meson setup build && meson compile -C build
+meson>=1.5
+ninja>=1.12

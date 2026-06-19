@@ -97,7 +97,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from gencad_parser import BoardModel, Component, Shape
+from .gencad_parser import BoardModel, Component, Shape
 
 
 XZZ_GLOBAL_SCALE = 10000  # raw -> mils
@@ -287,7 +287,7 @@ def _des_decrypt_buf(buf: bytes, key: int) -> bytes:
     do NOT cache decrypted results to disk — the plaintext is the
     proprietary file's content, and a cache file leaks that content."""
     try:
-        from xzz_native import decrypt as _native_decrypt
+        from .xzz_native import decrypt as _native_decrypt
         native = _native_decrypt(buf, key)
         if native is not None:
             return native

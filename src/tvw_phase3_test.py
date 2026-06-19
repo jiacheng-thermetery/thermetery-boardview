@@ -24,8 +24,8 @@ import time
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
-import boardview
-from gencad_parser import BoardModel, BrokenNet
+from .parsers import boardview
+from .parsers.gencad_parser import BoardModel, BrokenNet
 
 
 BOARDS: List[str] = [
@@ -56,7 +56,7 @@ def _pick_signal_nets_with_geometry(model: BoardModel,
     (b) have non-empty topology geometry. The first match for each is
     used as a smoke test for `trace_geometry_for_net`.
     """
-    from tvw_parser import _POWER_NET_RE
+    from .parsers.tvw_parser import _POWER_NET_RE
     graph = model.topology
     # One-pass collection of nets that actually carry geometry. Calling
     # `geometry_on_net` per candidate is O(segs+polys) each — too slow
@@ -81,7 +81,7 @@ def _pick_pad_centres(model: BoardModel,
                       n: int = 2) -> List[Tuple[float, float, str, str]]:
     """Pick up to n pads on signal (non-power) nets, return as
     (x, y, layer, expected_net_name)."""
-    from tvw_parser import _POWER_NET_RE
+    from .parsers.tvw_parser import _POWER_NET_RE
     graph = model.topology
     seen_nets: set = set()
     out: List[Tuple[float, float, str, str]] = []
