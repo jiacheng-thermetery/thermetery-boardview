@@ -96,8 +96,8 @@ android {
         applicationId = "com.thermetery.boardview"
         minSdk = 24
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.1.2"
+        versionCode = 4
+        versionName = "1.0.0"
 
         // Native kernels are prebuilt under src/main/jniLibs/<abi>/ for
         // exactly these two ABIs (16 KB-aligned, NDK r29).
