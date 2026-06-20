@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Thermetery Boardview</title>
+<link rel="stylesheet" href="viewer.css">
+</head>
+<body>
+<canvas id="bv-canvas"></canvas>
+
+<div id="bv-toolbar">
+  <div id="bv-btnstrip">
+    <button id="bv-btn-open"   type="button" title="Open board">Open</button>
+    <button id="bv-btn-layer"  type="button" title="Cycle layer">ALL</button>
+    <button id="bv-btn-traces" type="button" title="Toggle traces">Traces</button>
+    <button id="bv-btn-fit"    type="button" title="Fit board">Fit</button>
+    <button id="bv-btn-rotl"   type="button" title="Rotate left 90°" aria-label="Rotate left">&#8634;</button>
+    <button id="bv-btn-rotr"   type="button" title="Rotate right 90°" aria-label="Rotate right">&#8635;</button>
+    <button id="bv-btn-keys"   type="button" title="Decryption keys">Keys</button>
+  </div>
+  <input  id="bv-search" type="search" list="bv-suggest"
+          placeholder="Search ref / net…" autocomplete="off" autocapitalize="off"
+          autocorrect="off" spellcheck="false">
+  <datalist id="bv-suggest"></datalist>
+</div>
+
+<div id="bv-netchip" class="hidden">
+  <span id="bv-netchip-dot">&#9679;</span>
+  <span id="bv-netchip-name"></span>
+  <button id="bv-netchip-clear" type="button" title="Clear net highlight">&#10005;</button>
+</div>
+
+<div id="bv-panel">
+  <div id="bv-panel-head">
+    <span id="bv-panel-ref"></span>
+    <span id="bv-panel-meta"></span>
+    <button id="bv-panel-close" type="button" title="Close">&#10005;</button>
+  </div>
+  <div id="bv-panel-tabs">
+    <button id="bv-tab-pins" class="bv-tab on" type="button">Pins</button>
+    <button id="bv-tab-net"  class="bv-tab"    type="button">Net</button>
+  </div>
+  <div id="bv-panel-body">
+    <div id="bv-panel-pins"></div>
+    <div id="bv-panel-net" class="hidden"></div>
+  </div>
+</div>
+
+<div id="bv-status"></div>
+<div id="bv-toast" class="hidden"></div>
+
+<!-- dev harness (desktop browser only; hidden when window.Android exists) -->
+<div id="bv-dev" class="hidden">
+  <label id="bv-dev-filelabel" for="bv-dev-file">load board JSON</label>
+  <input id="bv-dev-file" type="file" accept=".json,application/json">
+</div>
+<div id="bv-drophint" class="hidden">drop board JSON</div>
+<pre id="bv-errlog" class="hidden"></pre>
+
+<script src="viewer.js"></script>
+</body>
+</html>

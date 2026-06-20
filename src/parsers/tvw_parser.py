@@ -62,6 +62,7 @@ References:
 from __future__ import annotations
 
 import math
+import os
 import re
 import struct
 from dataclasses import dataclass
@@ -70,6 +71,41 @@ from typing import Dict, List, Optional, Tuple
 
 from .gencad_parser import BoardModel, Component, Shape
 from .tvw_master_fp import parse_master_footprints, pins_world_positions
+
+# --------------------------------------------------------------------------
+# Optional C-DLL fast path for the two hottest cold-load scanners:
+#   _find_chip_headers       (~28% of cold load — whole-file Pascal scan)
+#   _parse_pin_records sweep  (~47% of cold load — per-chip probe loop)
+#
+# The pure-Python implementations below remain the authoritative
+# reference and the default whenever the DLL is missing, fails to load,
+# or raises. The native path is preferred only when:
+#   * tvw_native imports and reports available(), AND
+#   * the TVW_DISABLE_NATIVE_PINREC env var is NOT set (the benchmark and
+#     correctness harness use it to force the pure-Python fallback).
+# Each native call is additionally wrapped in try/except so any runtime
+# error transparently falls back to Python for that call.
+#
+# The native functions were verified BIT-IDENTICAL to the pure-Python
+# originals (full BoardModel hash match on Gigabyte X570) before this
+# wiring was committed — see _verify_pinrec.py.
+try:  # pragma: no cover - import guard
+    from . import tvw_native as _tvw_native
+except Exception:  # noqa: BLE001 - any import failure disables the fast path
+    _tvw_native = None
+
+
+def _native_pinrec_enabled() -> bool:
+    """True when the C fast path for chip-headers / pin-record sweep
+    should be used. Pure-Python otherwise."""
+    if _tvw_native is None:
+        return False
+    if os.environ.get("TVW_DISABLE_NATIVE_PINREC"):
+        return False
+    try:
+        return bool(_tvw_native.available())
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # --------------------------------------------------------------------------
@@ -299,6 +335,71 @@ def _parse_pin_records(buf: bytes, start: int, end_limit: int,
         })
         i += 1 + L + 16
     return out, i
+
+
+# --------------------------------------------------------------------------
+# Native-preferring wrappers (C fast path with pure-Python fallback)
+# --------------------------------------------------------------------------
+#
+# These wrap the two pure-Python scanners above. When the C DLL is
+# available and not disabled, they delegate to it; otherwise (or on any
+# native error) they run the identical pure-Python logic. The pure-Python
+# functions remain the authoritative reference and the default.
+
+def _chip_headers(buf: bytes) -> List[Dict]:
+    """Find chip headers, preferring the C fast path. Identical result to
+    `_find_chip_headers`."""
+    if _native_pinrec_enabled():
+        try:
+            res = _tvw_native.find_chip_headers(buf)
+            if res is not None:
+                return res
+        except Exception:  # noqa: BLE001 - fall back to pure-Python
+            pass
+    return _find_chip_headers(buf)
+
+
+def _best_pin_run(buf: bytes, pin_search_start: int, next_marker: int
+                  ) -> List[Dict]:
+    """Run the per-chip 0..64 probe-and-parse sweep and return the best
+    (longest) pin-record run — identical to the legacy driver loop:
+
+        best = []
+        for probe in range(0, 64):
+            tentative = pin_search_start + probe
+            if tentative >= next_marker: break
+            recs, _ = _parse_pin_records(buf, tentative, next_marker, 4000)
+            if len(recs) > len(best): best = recs
+            if len(recs) >= 50: break
+        return best
+
+    Prefers the C fast path (one native call folds the whole sweep);
+    falls back to the pure-Python loop on absence or error.
+    """
+    if _native_pinrec_enabled():
+        try:
+            res = _tvw_native.parse_pin_records_sweep(
+                buf, pin_search_start, next_marker,
+                probe_max=64, early_exit=50, max_records=4000,
+            )
+            if res is not None:
+                return res
+        except Exception:  # noqa: BLE001 - fall back to pure-Python
+            pass
+    # Pure-Python fallback: the original driver loop, verbatim.
+    best: List[Dict] = []
+    for probe in range(0, 64):
+        tentative = pin_search_start + probe
+        if tentative >= next_marker:
+            break
+        recs, _end = _parse_pin_records(
+            buf, tentative, end_limit=next_marker, max_records=4000,
+        )
+        if len(recs) > len(best):
+            best = recs
+        if len(recs) >= 50:  # plenty for any chip; stop early
+            break
+    return best
 
 
 # --------------------------------------------------------------------------
@@ -652,7 +753,7 @@ def _parse_gigabyte(path: Path) -> BoardModel:
     data = Path(path).read_bytes()
     model = BoardModel()
 
-    chips = _find_chip_headers(data)
+    chips = _chip_headers(data)
     family_count: Dict[str, int] = {}
     # Collected per-chip parse results, used by _build_signals to map pads
     # back to pins after all chips are placed.
@@ -703,19 +804,11 @@ def _parse_gigabyte(path: Path) -> BoardModel:
         # valid run.
         pin_search_start = chip['after_off']
         next_marker = bounds[ci + 1]
-        best_pins: List = []
-        for probe in range(0, 64):
-            tentative = pin_search_start + probe
-            if tentative >= next_marker:
-                break
-            recs, _end = _parse_pin_records(
-                data, tentative, end_limit=next_marker,
-                max_records=4000,
-            )
-            if len(recs) > len(best_pins):
-                best_pins = recs
-            if len(recs) >= 50:  # plenty for any chip; stop early
-                break
+        # Fold the whole 0..64 probe-and-parse sweep into one call. With
+        # the C DLL this is a single native call per chip; otherwise it
+        # runs the identical pure-Python driver loop. Result is the
+        # longest valid pin-record run found across the probe offsets.
+        best_pins: List = _best_pin_run(data, pin_search_start, next_marker)
 
         shape_name = f"_tvw_{chip['footprint']}_{family_count[family]}"
         shape = Shape(name=shape_name)

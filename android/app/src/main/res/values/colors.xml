@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark viewer chrome (matches the renderer's dark canvas). -->
+    <color name="board_background">#101417</color>
+    <!-- PCB-green brand colors. -->
+    <color name="pcb_green">#0B5135</color>
+    <color name="pcb_accent">#19C37D</color>
+    <color name="ic_launcher_background">#0B5135</color>
+</resources>

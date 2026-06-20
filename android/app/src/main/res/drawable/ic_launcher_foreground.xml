@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- "TB" monogram, stroked, centered in the adaptive-icon safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- T -->
+    <path
+        android:pathData="M28,40 L52,40 M40,40 L40,70"
+        android:strokeColor="#E8F5EC"
+        android:strokeWidth="7"
+        android:strokeLineCap="round" />
+
+    <!-- B: stem + two arc bumps -->
+    <path
+        android:pathData="M60,40 L60,70 M60,40 L68,40 A7.5,7.5 0 0 1 68,55 L60,55 M60,55 L69,55 A7.5,7.5 0 0 1 69,70 L60,70"
+        android:strokeColor="#E8F5EC"
+        android:strokeWidth="7"
+        android:strokeLineCap="round" />
+</vector>

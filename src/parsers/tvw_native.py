@@ -10,6 +10,7 @@ The DLL implements the 5 scanners that dominate cold-load time:
   - find_polyline_blocks       (count/type/poly framed blocks)
   - find_tagged_polylines      (net_id/K/verts/term tagged polylines)
   - find_segments_in_gap       (24-byte trace segments)
+  - find_pad_runs_in_gap       (gap-ranged 38-byte pad runs)
 
 Each native function returns the count of records written to a
 caller-supplied output array; we wrap them so callers see the same
@@ -21,6 +22,7 @@ callers fall through to the Python implementation transparently.
 from __future__ import annotations
 
 import ctypes
+import os
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -74,6 +76,30 @@ class _PolyChain(ctypes.Structure):
     ]
 
 
+class _ChipHdr(ctypes.Structure):
+    # Must mirror the C `ChipHdr` struct byte-for-byte.
+    _fields_ = [
+        ("off", ctypes.c_uint64),
+        ("s1_off", ctypes.c_uint32),
+        ("s1_len", ctypes.c_uint32),
+        ("s2_off", ctypes.c_uint32),
+        ("s2_len", ctypes.c_uint32),
+        ("after_off", ctypes.c_uint64),
+    ]
+
+
+class _PinRec(ctypes.Structure):
+    # Must mirror the C `PinRec` struct byte-for-byte.
+    _fields_ = [
+        ("name_off", ctypes.c_uint32),
+        ("name_len", ctypes.c_uint32),
+        ("x", ctypes.c_int32),
+        ("y", ctypes.c_int32),
+        ("flag", ctypes.c_int32),
+        ("idx", ctypes.c_int32),
+    ]
+
+
 # --------------------------------------------------------------------------
 # DLL loader
 # --------------------------------------------------------------------------
@@ -92,12 +118,24 @@ def _load() -> Optional[ctypes.CDLL]:
         names = ["tvw_native.dylib", "libtvw_native.dylib"]
     else:
         names = ["tvw_native.so", "libtvw_native.so"]
-    for n in names:
-        p = here / 'native' / n
-        if not p.exists():
-            continue
+    candidates: list[str] = []
+    env_dir = os.environ.get("BOARDVIEW_NATIVE_DIR")
+    if env_dir:
+        candidates += [str(Path(env_dir) / n) for n in names]
+    # Restructured (src-layout) location: libs live in the native/ subdir.
+    candidates += [str(here / 'native' / n) for n in names
+                   if (here / 'native' / n).exists()]
+    # Legacy flat layout: lib sitting next to this module.
+    candidates += [str(here / n) for n in names if (here / n).exists()]
+    if not sys.platform.startswith("win"):
+        # Android/APK and system installs: the lib may not exist as a plain
+        # file next to this module (it lives in the app's nativeLibraryDir,
+        # or this module is packaged inside a zip). A bare soname lets
+        # dlopen search the dynamic linker's own paths.
+        candidates += [n for n in names if n.startswith("lib")]
+    for cand in candidates:
         try:
-            lib = ctypes.CDLL(str(p))
+            lib = ctypes.CDLL(cand)
         except OSError:
             continue
 
@@ -154,6 +192,28 @@ def _load() -> Optional[ctypes.CDLL]:
             ctypes.POINTER(_PolyChain), ctypes.c_size_t,
         ]
         lib.find_polyline_chains_in_gap_native.restype = ctypes.c_size_t
+
+        lib.find_pad_runs_in_gap_native.argtypes = [
+            ctypes.c_char_p, ctypes.c_size_t,
+            ctypes.c_size_t, ctypes.c_size_t,
+            ctypes.c_uint32,
+            ctypes.POINTER(_SegRun), ctypes.c_size_t,
+        ]
+        lib.find_pad_runs_in_gap_native.restype = ctypes.c_size_t
+
+        lib.find_chip_headers_native.argtypes = [
+            ctypes.c_char_p, ctypes.c_size_t,
+            ctypes.POINTER(_ChipHdr), ctypes.c_size_t,
+        ]
+        lib.find_chip_headers_native.restype = ctypes.c_size_t
+
+        lib.parse_pin_records_sweep_native.argtypes = [
+            ctypes.c_char_p, ctypes.c_size_t,
+            ctypes.c_size_t, ctypes.c_size_t,
+            ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32,
+            ctypes.POINTER(_PinRec), ctypes.c_size_t,
+        ]
+        lib.parse_pin_records_sweep_native.restype = ctypes.c_size_t
 
         _LIB = lib
         return lib
@@ -276,6 +336,22 @@ def find_segments_in_gap(buf: bytes, gap_start: int, gap_end: int,
             for i in range(n)]
 
 
+def find_pad_runs_in_gap(buf: bytes, gap_start: int, gap_end: int,
+                         min_run: int = 50,
+                         ) -> Optional[List[Tuple[int, int]]]:
+    """Gap-ranged 38-byte pad-run scan. Returns list of (run_start, run_end)
+    — same shape as tvw_seg_27_unified_v3.find_pad_runs_in_gap. None if the
+    DLL is unavailable so the caller falls back to Python."""
+    lib = _load()
+    if lib is None:
+        return None
+    out = (_SegRun * _MAX_PAD_RUNS)()
+    n = lib.find_pad_runs_in_gap_native(
+        buf, len(buf), gap_start, gap_end, min_run, out, _MAX_PAD_RUNS,
+    )
+    return [(int(out[i].start), int(out[i].end)) for i in range(n)]
+
+
 _MAX_CHAINS = 4096
 
 
@@ -293,6 +369,81 @@ def find_polyline_chains_in_gap(buf: bytes, gap_start: int, gap_end: int,
     )
     return [(int(out[i].start), int(out[i].end), int(out[i].count))
             for i in range(n)]
+
+
+# --------------------------------------------------------------------------
+# Chip-header scan + per-chip pin-record probe sweep.
+# --------------------------------------------------------------------------
+#
+# These two mirror tvw_parser._find_chip_headers and the per-chip
+# 0..64 probe-and-parse loop around tvw_parser._parse_pin_records. Each
+# returns the SAME Python objects the pure-Python originals produced
+# (dicts with the same keys / string decode), or None when the DLL is
+# unavailable so the caller can fall back.
+
+# Generous ceilings. The largest TVW we have (~6.8 MB Z490) yields ~2790
+# chip headers and the biggest socket pin run is ~1337 records; 4000 is
+# the parser's own per-chip max_records cap.
+_MAX_CHIP_HDRS = 16384
+_MAX_PIN_RECS = 4096
+
+
+def find_chip_headers(buf: bytes) -> Optional[List[dict]]:
+    """Whole-file chip-header scan. Returns list of dicts with keys
+    {off, dev_name, footprint, after_off} — byte-identical to
+    tvw_parser._find_chip_headers. Returns None if the DLL is absent."""
+    lib = _load()
+    if lib is None:
+        return None
+    out = (_ChipHdr * _MAX_CHIP_HDRS)()
+    n = lib.find_chip_headers_native(buf, len(buf), out, _MAX_CHIP_HDRS)
+    res: List[dict] = []
+    for i in range(n):
+        h = out[i]
+        s1_off = int(h.s1_off)
+        s1_len = int(h.s1_len)
+        s2_off = int(h.s2_off)
+        s2_len = int(h.s2_len)
+        dev = buf[s1_off + 1:s1_off + 1 + s1_len].decode("latin-1")
+        fp = buf[s2_off + 1:s2_off + 1 + s2_len].decode("latin-1")
+        res.append({
+            "off": int(h.off),
+            "dev_name": dev,
+            "footprint": fp,
+            "after_off": int(h.after_off),
+        })
+    return res
+
+
+def parse_pin_records_sweep(
+        buf: bytes, pin_search_start: int, next_marker: int,
+        probe_max: int = 64, early_exit: int = 50, max_records: int = 4000,
+        ) -> Optional[List[dict]]:
+    """Run the whole 0..probe_max probe-and-parse sweep for ONE chip in a
+    single native call. Returns the best run's records as a list of dicts
+    {name, x, y, flag, idx} — byte-identical to the Python driver loop's
+    `best_pins`. Returns None if the DLL is absent."""
+    lib = _load()
+    if lib is None:
+        return None
+    out = (_PinRec * _MAX_PIN_RECS)()
+    n = lib.parse_pin_records_sweep_native(
+        buf, len(buf), pin_search_start, next_marker,
+        probe_max, early_exit, max_records,
+        out, _MAX_PIN_RECS,
+    )
+    res: List[dict] = []
+    for i in range(n):
+        r = out[i]
+        name_off = int(r.name_off)
+        name_len = int(r.name_len)
+        name = buf[name_off:name_off + name_len].decode("latin-1")
+        res.append({
+            "name": name,
+            "x": int(r.x), "y": int(r.y),
+            "flag": int(r.flag), "idx": int(r.idx),
+        })
+    return res
 
 
 # --------------------------------------------------------------------------
@@ -696,6 +847,9 @@ __all__ = [
     "find_tagged_polylines_in_gap",
     "find_segments_in_gap",
     "find_polyline_chains_in_gap",
+    "find_pad_runs_in_gap",
+    "find_chip_headers",
+    "parse_pin_records_sweep",
     "build_topology",
     "build_topology_arrays",
 ]

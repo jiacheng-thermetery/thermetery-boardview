@@ -106,6 +106,14 @@ def find_tagged_polylines_in_gap(buf, gap_start, gap_end, term_size=4,
 
 
 def find_pad_runs_in_gap(buf, gap_start, gap_end, min_run=50):
+    # Native fast path — see tvw_native.c.
+    try:
+        from .tvw_native import find_pad_runs_in_gap as _nat_pad_runs
+        result = _nat_pad_runs(buf, gap_start, gap_end, min_run=min_run)
+        if result is not None:
+            return result
+    except Exception:
+        pass
     n = gap_end
     runs = []
 
@@ -165,6 +173,13 @@ def find_segments_in_gap(buf, gap_start, gap_end, min_run=10, allow_zero_net=Tru
                 p += 24; cnt += 1
             if cnt >= min_run:
                 runs.append((run_start, p, cnt))
+            else:
+                # Short run: roll back to one byte past the run start so the
+                # scan re-tests bytes inside it and re-syncs onto the true
+                # 24-byte record grid. Without this, a phase-misaligned false
+                # short run at a gap head drops the real leading records.
+                # Mirrors tvw_native.c find_segments_in_gap (p = run_start + 1).
+                p = run_start + 1
         else:
             p += 1
     return runs
@@ -329,6 +344,11 @@ def analyze(file_path, region_start, region_end, label):
 
 
 if __name__ == "__main__":
-    analyze("C:/Claude Code/Z490 VISION G r1.0.tvw", 8_528, 4_761_170, "Z490 Custom_35")
-    analyze("C:/Claude Code/Gigabyte_X570_GAMING_X_REV1.01.tvw", 4_754, 1_838_204, "X570 Custom_21")
-    analyze("C:/Claude Code/B550_AORUS_PRO_AC_REV1.0.tvw", 6_474, 3_978_556, "B550 Custom_26")
+    import sys as _sys
+
+    # Usage: python tvw_seg_27_unified_v3.py FILE.tvw REGION_START REGION_END [LABEL]
+    if len(_sys.argv) < 4:
+        print(__doc__ or "usage: tvw_seg_27_unified_v3.py FILE.tvw START END [LABEL]")
+        _sys.exit(2)
+    _label = _sys.argv[4] if len(_sys.argv) > 4 else Path(_sys.argv[1]).name
+    analyze(_sys.argv[1], int(_sys.argv[2]), int(_sys.argv[3]), _label)

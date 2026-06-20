@@ -1,0 +1,13 @@
+# Machine-local SDK path
+local.properties
+
+# Gradle / build output
+.gradle/
+build/
+app/build/
+.kotlin/
+
+# Android Studio cruft (we build from the command line, but just in case)
+.idea/
+captures/
+*.iml

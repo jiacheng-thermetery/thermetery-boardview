@@ -95,3 +95,15 @@ dist/
 
 # User config (last-used dir + recent file list)
 .boardviewer.json
+
+# Android exporter scratch dir — local sample JSON for the JS renderer
+# dev harness (exported from proprietary boardviews; never commit).
+_android_samples/
+
+# Renderer verification screenshots (local emulator/headless captures).
+_renderer_shots/
+
+# Android: the prebuilt native libs ARE committed — cross-compiled .so for
+# the two shipped ABIs (arm64-v8a, x86_64), 16 KB-aligned. Exempt them from
+# the global *.so ignore above so a fresh `git add` keeps tracking them.
+!android/app/src/main/jniLibs/**/*.so

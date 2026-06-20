@@ -49,6 +49,27 @@ import re
 
 from .parsers.gencad_parser import BoardModel, Component, Shape
 
+# Optional numpy acceleration for the three whole-file byte scanners
+# (_scan_r1_layers, _build_pad_index, _scan_net_names). These are pure
+# `while i < len(data)` loops over all ~12.8M bytes of a Compal TVW and
+# dominate cold-parse wall time (~71%). numpy lets us collapse the 12.8M
+# Python iterations to the ~0.85M-1.8M candidate offsets that survive a
+# vectorized prefilter (np.frombuffer + boolean masks + np.nonzero)
+# before any per-byte validation runs.
+#
+# This is ADDITIVE and OPTIONAL: if numpy is missing or the fast path
+# raises for any reason, every scanner transparently falls back to the
+# byte-for-byte-identical pure-Python implementation kept below as
+# `_<name>_py`. The fast paths are written to produce the exact same
+# result (dict / list) as the reference loops, including ordering and
+# first-seen dedup semantics.
+try:
+    import numpy as _np
+    _NUMPY_OK = True
+except Exception:  # pragma: no cover - numpy is normally present
+    _np = None
+    _NUMPY_OK = False
+
 
 # --------------------------------------------------------------------------
 # Constants
@@ -282,6 +303,102 @@ def _scan_r1_layers(data: bytes) -> Dict[str, int]:
     non-zero metadata, so we mask to the low byte. (Across T480 the
     high bytes are 0 in 99 % of records; the rare exceptions are
     structurally consistent with low-byte-only layer encoding.)
+
+    Dispatches to a numpy-accelerated prefilter when available; falls
+    back to the pure-Python reference loop (`_scan_r1_layers_py`) on any
+    error or when numpy is absent.
+    """
+    if _NUMPY_OK:
+        try:
+            return _scan_r1_layers_np(data)
+        except Exception:
+            pass
+    return _scan_r1_layers_py(data)
+
+
+def _scan_r1_layers_np(data: bytes) -> Dict[str, int]:
+    """numpy fast path for `_scan_r1_layers`.
+
+    The selective signal in the pure-Python loop is the 8-byte
+    ``_R1_SIGNATURE`` that must sit at after-Pascal +12..+19, i.e. at
+    file offset ``i + 1 + L + 12`` where ``i`` is the length-byte offset
+    and ``L = data[i]`` the refdes length (2..16). Rather than test all
+    ~12.8M positions, we locate the (few thousand) signature occurrences
+    directly and recover the candidate ``i`` for each.
+
+    For a signature at ``sig_pos``, a match position satisfies
+    ``i = sig_pos - 13 - L`` with ``L = data[i]``. We try every
+    ``L in [2, 16]``, keep the ones where ``data[i] == L``, then process
+    the resulting candidate ``i`` values in ascending order applying the
+    *identical* validation and first-seen dedup as the reference loop.
+    This is exactly equivalent: the reference loop's only state is the
+    ``i += 1 + L`` skip after a successful match, but that skip lands
+    within the matched refdes (which ends at ``i + 1 + L``, strictly
+    before the signature) and never reaches another candidate's length
+    byte, so processing candidates in ascending ``i`` order with
+    first-seen dedup reproduces it byte-for-byte.
+    """
+    n = len(data)
+    if n <= 50:
+        return _scan_r1_layers_py(data)
+    a = _np.frombuffer(data, dtype=_np.uint8)
+    sig = _np.frombuffer(_R1_SIGNATURE, dtype=_np.uint8)
+
+    # Find signature occurrences: anchor on the first signature byte,
+    # then verify the full 8-byte window vectorized.
+    cand = _np.nonzero(a[: n - 8] == sig[0])[0]
+    if cand.size:
+        ok = _np.ones(cand.shape, dtype=bool)
+        for k in range(1, 8):
+            ok &= a[cand + k] == sig[k]
+        sig_pos = cand[ok]
+    else:
+        sig_pos = cand
+
+    # Recover candidate length-byte offsets i = sig_pos - 13 - L for
+    # each plausible L, keeping those where data[i] == L. Collect into a
+    # single ascending-sorted array of (i, L) pairs.
+    cand_i_list = []
+    for L in range(2, 17):
+        ii = sig_pos - (13 + L)
+        ii = ii[ii >= 0]
+        if ii.size:
+            ii = ii[a[ii] == L]
+            if ii.size:
+                cand_i_list.append(ii)
+    if not cand_i_list:
+        return {}
+    cand_i = _np.unique(_np.concatenate(cand_i_list))  # sorted ascending
+
+    r1: Dict[str, int] = {}
+    limit = n - 50
+    for i in cand_i.tolist():
+        if i >= limit:
+            continue
+        L = data[i]  # == one of 2..16 by construction
+        s = data[i + 1:i + 1 + L]
+        if not all(0x20 <= b < 0x7f for b in s):
+            continue
+        try:
+            text = s.decode("ascii")
+        except UnicodeDecodeError:
+            continue
+        if (text[0].isalpha()
+                and all(c.isalnum() or c in "_-" for c in text)
+                and data[i + 1 + L + 12:i + 1 + L + 20] == _R1_SIGNATURE
+                and not _KNOWN_PIN_PATTERNS.fullmatch(text)):
+            if text not in r1:
+                v = int.from_bytes(data[i + 1 + L + 24:i + 1 + L + 28],
+                                   "little")
+                r1[text] = v & 0xFF
+    return r1
+
+
+def _scan_r1_layers_py(data: bytes) -> Dict[str, int]:
+    """Pure-Python reference implementation of `_scan_r1_layers`.
+
+    Kept as the canonical fallback; the numpy fast path above must
+    produce an identical result.
     """
     r1: Dict[str, int] = {}
     i = 0
@@ -609,6 +726,88 @@ def _scan_net_names(data: bytes) -> List[str]:
     0-based**: ``nets[0]`` is the first Pascal-prefixed name in the
     table (verified against ground-truth from BoardViewer.exe — GND
     at index 45, USBCOMP at 1446, PECI at 1330, etc.).
+
+    Dispatches to a numpy-accelerated prefilter when available; falls
+    back to the pure-Python reference loop (`_scan_net_names_py`) on any
+    error or when numpy is absent.
+    """
+    if _NUMPY_OK:
+        try:
+            return _scan_net_names_np(data)
+        except Exception:
+            pass
+    return _scan_net_names_py(data)
+
+
+def _scan_net_names_np(data: bytes) -> List[str]:
+    """numpy fast path for `_scan_net_names`.
+
+    The reference loop scans every offset in the candidate region but
+    only does meaningful work where the duplicated-count header
+    (``c1 == c2`` with ``100 <= c1 <= 20000``) holds. We vector-locate
+    those header offsets (a couple thousand vs ~2.6M positions), then
+    run the identical Pascal-string walk on each, in ascending offset
+    order, returning the first that validates — exactly as the reference
+    loop does.
+    """
+    n = len(data)
+    lo = 0xa00000
+    hi = min(0xc40000, n - 16)
+    if hi <= lo:
+        return _scan_net_names_py(data)
+    a = _np.frombuffer(data, dtype=_np.uint8)
+
+    # Contiguous-slice little-endian u32 over the region (cheap; no
+    # fancy-indexing). c1 = u32 @ i, c2 = u32 @ i+4.
+    b0 = a[lo:hi].astype(_np.uint32)
+    b1 = a[lo + 1:hi + 1].astype(_np.uint32)
+    b2 = a[lo + 2:hi + 2].astype(_np.uint32)
+    b3 = a[lo + 3:hi + 3].astype(_np.uint32)
+    c1 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    d0 = a[lo + 4:hi + 4].astype(_np.uint32)
+    d1 = a[lo + 5:hi + 5].astype(_np.uint32)
+    d2 = a[lo + 6:hi + 6].astype(_np.uint32)
+    d3 = a[lo + 7:hi + 7].astype(_np.uint32)
+    c2 = d0 | (d1 << 8) | (d2 << 16) | (d3 << 24)
+    mask = (c1 == c2) & (c1 >= 100) & (c1 <= 20000)
+    cand = (_np.nonzero(mask)[0] + lo).tolist()  # ascending
+
+    for i in cand:
+        c1v = int.from_bytes(data[i:i + 4], "little")
+        # Verify the first Pascal name parses as ASCII text.
+        L = data[i + 8]
+        if not (1 <= L <= 80):
+            continue
+        first = data[i + 9:i + 9 + L]
+        if not all(0x20 <= b < 0x7f for b in first):
+            continue
+        nets: List[str] = []
+        pos = i + 8
+        ok = True
+        for _ in range(c1v):
+            if pos >= len(data):
+                ok = False
+                break
+            sL = data[pos]
+            if sL > 200 or pos + 1 + sL > len(data):
+                ok = False
+                break
+            sb = data[pos + 1:pos + 1 + sL]
+            if not all(0x20 <= b < 0x7f for b in sb):
+                ok = False
+                break
+            nets.append(sb.decode("ascii"))
+            pos += 1 + sL
+        if ok and len(nets) == c1v:
+            return nets
+    return []
+
+
+def _scan_net_names_py(data: bytes) -> List[str]:
+    """Pure-Python reference implementation of `_scan_net_names`.
+
+    Kept as the canonical fallback; the numpy fast path above must
+    produce an identical result.
     """
     # Scan a likely region. The table sits roughly between the chip
     # tables and the master pool on Compal/Lenovo files.
@@ -684,6 +883,87 @@ def _build_pad_index(data: bytes) -> Dict[Tuple[int, int], int]:
     stride-19 grid relative to file position 0 — stride-19 advance
     happened to work historically only because of zero-padded slack
     between the early layer regions.
+
+    Dispatches to a numpy-accelerated prefilter when available; falls
+    back to the pure-Python reference loop (`_build_pad_index_py`) on
+    any error or when numpy is absent.
+    """
+    if _NUMPY_OK:
+        try:
+            return _build_pad_index_np(data)
+        except Exception:
+            pass
+    return _build_pad_index_py(data)
+
+
+def _build_pad_index_np(data: bytes) -> Dict[Tuple[int, int], int]:
+    """numpy fast path for `_build_pad_index`.
+
+    The reference loop visits EVERY byte offset, always advancing by 1,
+    and only does real work where the cheap pre-check (2 zero bytes at
+    +0..+1) passes. We reproduce that exactly: a vectorized prefilter
+    finds all 2-zero candidate offsets (~1.8M of 12.8M), then we vector-
+    decode net_id / pad_type / Y / X for those offsets, apply the same
+    numeric gates, and walk the survivors in ascending offset order with
+    first-seen-coord dedup — identical to the reference output.
+    """
+    n = len(data) - 19
+    if n <= 0:
+        return {}
+    a = _np.frombuffer(data, dtype=_np.uint8)
+
+    # Prefilter: positions i in [0, n) with data[i]==0 and data[i+1]==0.
+    base = a[:n]
+    cand = _np.nonzero((base == 0) & (a[1:n + 1] == 0))[0]
+    if cand.size == 0:
+        return {}
+
+    # Vector-decode the little-endian integer fields at the candidate
+    # offsets. net_id (u32 @ +3), pad_type (u32 @ +7), Y (i32 @ +11),
+    # X (i32 @ +15). Build each from its 4 constituent bytes so we never
+    # rely on alignment.
+    def _u32(off):
+        return (a[cand + off].astype(_np.uint32)
+                | (a[cand + off + 1].astype(_np.uint32) << 8)
+                | (a[cand + off + 2].astype(_np.uint32) << 16)
+                | (a[cand + off + 3].astype(_np.uint32) << 24))
+
+    net_id = _u32(3)
+    pad_type = _u32(7)
+    y_u = _u32(11)
+    x_u = _u32(15)
+    # Signed interpretation for the coords.
+    y_s = y_u.astype(_np.int64)
+    y_s = _np.where(y_s >= 0x80000000, y_s - 0x100000000, y_s)
+    x_s = x_u.astype(_np.int64)
+    x_s = _np.where(x_s >= 0x80000000, x_s - 0x100000000, x_s)
+
+    keep = (net_id < 4000)
+    keep &= (pad_type != 0) & (pad_type < 100000)
+    keep &= (y_s <= 2_000_000) & (y_s >= -2_000_000)
+    keep &= (x_s <= 2_000_000) & (x_s >= -2_000_000)
+
+    sel = _np.nonzero(keep)[0]
+    if sel.size == 0:
+        return {}
+    # cand is already ascending, so sel preserves ascending offset order;
+    # first-seen-coord dedup then matches the reference loop exactly.
+    nets = net_id[sel].tolist()
+    ys = y_s[sel].tolist()
+    xs = x_s[sel].tolist()
+    index: Dict[Tuple[int, int], int] = {}
+    for Y, X, nid in zip(ys, xs, nets):
+        key = (Y, X)
+        if key not in index:
+            index[key] = nid
+    return index
+
+
+def _build_pad_index_py(data: bytes) -> Dict[Tuple[int, int], int]:
+    """Pure-Python reference implementation of `_build_pad_index`.
+
+    Kept as the canonical fallback; the numpy fast path above must
+    produce an identical result.
     """
     index: Dict[Tuple[int, int], int] = {}
     i = 0

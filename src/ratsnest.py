@@ -120,19 +120,35 @@ def _pin_world_xy(component, shape, pin_name: str) -> Optional[Tuple[float, floa
 # Kruskal MST
 # --------------------------------------------------------------------------
 
-def _mst_edges(points: List[Tuple[float, float, str]]) -> List[Tuple[int, int]]:
-    """Compute MST edge indices over `points = [(x, y, layer), ...]`
-    using Kruskal over squared Euclidean distances. Layer is passed
-    through but not used as a metric — cross-layer edges are emitted,
-    just classified later by the caller.
+# Below this pin count the pure-Python all-pairs build wins: numpy's
+# fixed per-call overhead (array alloc, triu_indices, argsort setup) costs
+# more than the handful of tuples a tiny net produces. The crossover is
+# empirically ~64 pins; the giant power/ground nets that dominate cold
+# load (GND can be 3000+ pins) are far above it and are exactly where
+# the O(n²) Python loop + 6 M-tuple sort hurts. Keeping the small-net
+# path on pure Python also keeps those builds allocation-free.
+_NUMPY_MST_THRESHOLD = 64
 
-    Returns list of `(idx_a, idx_b)` indices into `points`. The MST has
-    exactly `len(points) - 1` edges (or 0 if len(points) < 2).
+# Candidate-pool sizing for the numpy MST (see `_mst_edges_numpy`).
+# Kruskal stops as soon as the tree is spanned, so we sort only a pool of
+# the cheapest edges rather than all m = n·(n-1)/2 of them. The initial
+# pool is max(_MST_POOL_MIN, m // _MST_POOL_DIVISOR); on the power/ground
+# nets we have, the longest MST edge ranks well under 1/8 of all edges, so
+# a divisor of 8 spans the tree in a single argpartition+sort. The minimum
+# guards small/medium nets where m // 8 would be a too-tight pool.
+_MST_POOL_DIVISOR = 8
+_MST_POOL_MIN = 4096
+
+
+def _mst_edges_python(
+    points: List[Tuple[float, float, str]], n: int
+) -> List[Tuple[int, int]]:
+    """Reference Kruskal MST — the original pure-Python implementation.
+
+    Builds all-pairs squared distances, sorts `(dist², i, j)` ascending,
+    then runs union-find. This is the fallback when numpy is unavailable
+    and the exact behaviour the numpy path reproduces bit-for-bit.
     """
-    n = len(points)
-    if n < 2:
-        return []
-
     # All-pairs squared Euclidean distances. For n < ~150 this beats
     # the per-edge sort cost of a triangulation.
     edges: List[Tuple[float, int, int]] = []
@@ -165,6 +181,168 @@ def _mst_edges(points: List[Tuple[float, float, str]]) -> List[Tuple[int, int]]:
             if len(out) == target:
                 break
     return out
+
+
+def _kruskal_select(
+    ii_l: List[int], jj_l: List[int], n: int, target: int
+) -> Tuple[List[Tuple[int, int]], bool]:
+    """Run the reference union-find over pre-sorted edge index lists.
+
+    `ii_l`/`jj_l` are the (i, j) endpoints in ascending `(dist², i, j)`
+    order. Returns `(edges, complete)` where `complete` is True iff the
+    MST was fully spanned (`target` edges found) before the pool ran out.
+    This is the *identical* union-find used by `_mst_edges_python`, so as
+    long as the pool covers the edges Kruskal would consume, the result
+    is bit-for-bit the same.
+    """
+    parent = list(range(n))
+    out: List[Tuple[int, int]] = []
+    out_append = out.append
+    found = 0
+
+    # `find` is inlined below with the identical path-halving the
+    # reference uses (`parent[a] = parent[parent[a]]`), and union is the
+    # identical rank-less `parent[ri] = rj`. Inlining matters because this
+    # loop scans hundreds of thousands of edges on big power nets and the
+    # per-edge function-call overhead dominated otherwise. The mutations
+    # are byte-for-byte the reference's, so the output is unchanged.
+    for i, j in zip(ii_l, jj_l):
+        # find(i) with path halving
+        ri = i
+        while parent[ri] != ri:
+            parent[ri] = parent[parent[ri]]
+            ri = parent[ri]
+        # find(j) with path halving
+        rj = j
+        while parent[rj] != rj:
+            parent[rj] = parent[parent[rj]]
+            rj = parent[rj]
+        if ri != rj:
+            parent[ri] = rj
+            out_append((i, j))
+            found += 1
+            if found == target:
+                return out, True
+    return out, found == target
+
+
+def _mst_edges_numpy(
+    points: List[Tuple[float, float, str]], n: int
+) -> List[Tuple[int, int]]:
+    """Vectorized all-pairs build + sort for the Kruskal MST.
+
+    Bit-identical to `_mst_edges_python`: only the two O(n²) phases — the
+    squared-distance build and the edge ordering — are moved into numpy.
+    The union-find *selection* (`_kruskal_select`) is byte-for-byte the
+    same as the reference, so tie-breaking, path-compression order, and
+    the final edge list are all preserved exactly.
+
+    Why this is identical, not merely "an MST":
+      * Squared distances use float64 (== Python float), computed as
+        (xi-xj)² + (yi-yj)² — the same IEEE-754 ops as the reference, so
+        the dist² values match bit-for-bit.
+      * `np.triu_indices(n, 1)` enumerates pairs in row-major order, i.e.
+        already ascending in (i, then j). A *stable* argsort on dist²
+        therefore breaks ties by (i, j) exactly as the reference's
+        `list.sort()` on the `(dist², i, j)` tuple does — the resulting
+        edge order is identical, which we assert in the test harness.
+      * The same union-find then walks that identical order, so it adds
+        exactly the same edges in the same sequence.
+
+    Performance: Kruskal stops the instant the tree is spanned, so we
+    avoid sorting all m = n·(n-1)/2 edges. We take a candidate POOL of the
+    cheapest edges via `np.argpartition` (O(m), no sort), extend the cut
+    to the whole tie group at its boundary (so no equal-dist² edge is
+    split across the cut and the stable order within the pool matches the
+    full-array order), stable-sort just that pool, and run union-find. If
+    the pool is too small to span the tree we grow it; the final fallback
+    sorts everything. Correctness never depends on the pool size — only
+    speed does.
+    """
+    xs = _np.fromiter((p[0] for p in points), dtype=_np.float64, count=n)
+    ys = _np.fromiter((p[1] for p in points), dtype=_np.float64, count=n)
+
+    # Upper-triangle index pairs (i < j) in row-major order. We only build
+    # the n*(n-1)/2 unique pairs, never the full n² matrix.
+    ii, jj = _np.triu_indices(n, 1)
+
+    dx = xs[ii] - xs[jj]
+    dy = ys[ii] - ys[jj]
+    dist2 = dx * dx + dy * dy  # float64, matches Python's dx*dx + dy*dy
+
+    m = dist2.shape[0]
+    target = n - 1
+
+    def _select_from_pool(pool):
+        """Stable-sort `pool` (edge indices, already ascending = row-major)
+        by dist² and run the reference union-find over it."""
+        # `pool` comes from flatnonzero / arange, so it is itself ascending
+        # in edge index = ascending in (i, j). A stable sort by dist² thus
+        # yields ascending (dist², i, j) — identical to the reference.
+        order = _np.argsort(dist2[pool], kind="stable")
+        sel = pool[order]
+        return _kruskal_select(ii[sel].tolist(), jj[sel].tolist(), n, target)
+
+    # Pool sizing. The longest MST edge tends to sit a few percent into the
+    # full distance ranking on real power/ground nets, so an initial pool
+    # of ~1/8 of the edges spans the tree in a single argpartition+sort for
+    # the boards we have, while still being far cheaper than the full sort.
+    # We grow geometrically and cap before the full-sort fallback so a
+    # pathological net never loops more than a couple of times.
+    K = max(_MST_POOL_MIN, m // _MST_POOL_DIVISOR)
+    while K < m:
+        # K cheapest edges by dist² (unordered). argpartition is O(m).
+        part = _np.argpartition(dist2, K)[: K + 1]
+        # Extend the cut to the COMPLETE tie group at the boundary: include
+        # every edge with dist² <= the largest dist² in the partition. This
+        # guarantees the pool is exactly {edges with dist² <= thresh}, so
+        # its stable-by-dist² order matches the corresponding prefix of the
+        # full-array stable order (no tie group straddles the cut).
+        thresh = dist2[part].max()
+        pool = _np.flatnonzero(dist2 <= thresh)
+        out, complete = _select_from_pool(pool)
+        if complete:
+            return out
+        K *= 4  # pool too small for this net — widen aggressively.
+
+    # Fallback: sort the whole edge set. Still vectorized and identical
+    # ordering; reached only for tiny m or a pathological non-spanning pool.
+    out, _ = _select_from_pool(_np.arange(m))
+    return out
+
+
+def _mst_edges(points: List[Tuple[float, float, str]]) -> List[Tuple[int, int]]:
+    """Compute MST edge indices over `points = [(x, y, layer), ...]`
+    using Kruskal over squared Euclidean distances. Layer is passed
+    through but not used as a metric — cross-layer edges are emitted,
+    just classified later by the caller.
+
+    Returns list of `(idx_a, idx_b)` indices into `points`. The MST has
+    exactly `len(points) - 1` edges (or 0 if len(points) < 2).
+
+    The all-pairs build is O(n²); on the power/ground nets (thousands of
+    pins) that dominate GENCAD/CAD cold load this is the single biggest
+    cost in the repo. When numpy is available and the net is large enough
+    to amortise the per-call overhead, the O(n²) distance build and the
+    edge sort run vectorized (`_mst_edges_numpy`); the union-find
+    selection — and therefore the exact output — is unchanged. Tiny nets
+    and the no-numpy case use the pure-Python reference
+    (`_mst_edges_python`), which remains the default fallback.
+    """
+    n = len(points)
+    if n < 2:
+        return []
+
+    if _HAVE_NUMPY and n >= _NUMPY_MST_THRESHOLD:
+        try:
+            return _mst_edges_numpy(points, n)
+        except Exception:
+            # Any numpy hiccup (unexpected dtype, allocation failure on a
+            # pathologically huge net, etc.) falls back to the reference
+            # so a build never fails just because the fast path tripped.
+            return _mst_edges_python(points, n)
+
+    return _mst_edges_python(points, n)
 
 
 # --------------------------------------------------------------------------
