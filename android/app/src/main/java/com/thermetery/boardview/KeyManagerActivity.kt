@@ -109,6 +109,19 @@ class KeyManagerActivity : ComponentActivity() {
             layoutParams = lp
         })
 
+        root.addView(TextView(this).apply {
+            text = "Third-party licenses"
+            setTextColor(Color.parseColor("#8b93b8"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(8), dp(16), dp(8), dp(8))
+            setOnClickListener {
+                startActivity(
+                    android.content.Intent(this@KeyManagerActivity, LicensesActivity::class.java)
+                )
+            }
+        })
+
         setContentView(ScrollView(this).apply {
             setBackgroundColor(Color.parseColor("#0d1024"))
             addView(root)

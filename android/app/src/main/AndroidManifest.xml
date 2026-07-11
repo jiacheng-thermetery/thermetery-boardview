@@ -65,5 +65,13 @@
             android:exported="false"
             android:label="@string/key_manager_title"
             android:parentActivityName=".MainActivity" />
+
+        <!-- Read-only third-party license viewer, reachable from the
+             key-management screen's footer. Not exported. -->
+        <activity
+            android:name=".LicensesActivity"
+            android:exported="false"
+            android:label="@string/licenses_title"
+            android:parentActivityName=".KeyManagerActivity" />
     </application>
 </manifest>

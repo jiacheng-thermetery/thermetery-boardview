@@ -85,6 +85,18 @@ should sign the app executable and installer with the project's certificate.
 Organizations distributing the Inno Setup-based installer commercially should
 also confirm that their Inno Setup license covers that use.
 
+## Android licenses
+
+`collect_android_licenses.py` is the APK counterpart of `collect_licenses.py`:
+it consolidates the project notices, the Chaquopy-installed Python
+requirements (read from `android/app/build/python/pip/release/common`, so a
+build must exist), and the static texts under `LICENSES/android/` into
+`android/app/src/main/assets/third_party_licenses.txt`. The asset is
+committed so APK builds stay offline-deterministic; re-run the script and
+commit the result whenever the Chaquopy `pip` block, the Chaquopy/Python
+version, or the bundled runtime components change. The app shows it under
+Keys → Third-party licenses.
+
 ## GitHub Actions
 
 `.github/workflows/windows-release.yml` runs the same build on a hosted Windows

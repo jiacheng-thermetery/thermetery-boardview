@@ -5,4 +5,5 @@
     <string name="key_dialog_open">Open</string>
     <string name="key_dialog_cancel">Cancel</string>
     <string name="key_manager_title">Decryption keys</string>
+    <string name="licenses_title">Third-party licenses</string>
 </resources>
