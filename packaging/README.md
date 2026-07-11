@@ -88,7 +88,8 @@ also confirm that their Inno Setup license covers that use.
 ## GitHub Actions
 
 `.github/workflows/windows-release.yml` runs the same build on a hosted Windows
-x64 runner. It can be started manually with a semantic version or triggered by
-pushing a tag such as `v1.0.0`. The workflow uploads the installer, portable ZIP,
-and checksum file as one Actions artifact. It does not create or publish a
-GitHub Release automatically.
+x64 runner. It is manual-only: start it from the Actions tab with a semantic
+version (tag pushes deliberately do not trigger it, so cutting a release never
+burns a runner unasked). The workflow uploads the installer, portable ZIP, and
+checksum file as one Actions artifact. It does not create or publish a GitHub
+Release automatically.
