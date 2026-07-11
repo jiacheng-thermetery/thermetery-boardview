@@ -59,15 +59,30 @@ REQUIRED_PIP_DISTRIBUTIONS: Tuple[str, ...] = (
 STATIC_SECTIONS: Tuple[Tuple[str, str], ...] = (
     ("CPython 3.13 (embedded via Chaquopy) - PSF License 2.0",
      "LICENSES/android/CPython-PSF-2.0.txt"),
+    ("bzip2/libbzip2 1.0.8 (statically linked into CPython's _bz2 module) - "
+     "bzip2 License",
+     "LICENSES/android/bzip2-1.0.8.txt"),
+    ("libffi (statically linked into CPython's _ctypes module) - MIT License",
+     "LICENSES/android/libffi-MIT.txt"),
     ("Chaquopy runtime - MIT License",
      "LICENSES/android/Chaquopy-MIT.txt"),
     ("OpenSSL 3.0 (libcrypto/libssl, bundled by Chaquopy) - Apache License 2.0",
      "LICENSES/android/Apache-2.0.txt"),
     ("SQLite (libsqlite3, bundled by Chaquopy) - Public Domain",
      "LICENSES/android/SQLite-blessing.txt"),
+    ("Mozilla CA certificate bundle (assets/chaquopy/cacert.pem, extracted "
+     "from Mozilla's certdata.txt, bundled by Chaquopy; Source Code Form: "
+     "https://hg.mozilla.org/releases/mozilla-release/file/tip/security/nss/"
+     "lib/ckfw/builtins/certdata.txt) - Mozilla Public License 2.0",
+     "LICENSES/android/MPL-2.0.txt"),
     ("AndroidX (core-ktx, activity-ktx) and the Kotlin standard library - "
      "Apache License 2.0",
      "LICENSES/android/Apache-2.0.txt"),
+    ("GNU General Public License v3 (applies to chaquopy-libgfortran; also "
+     "incorporated by reference by this application's LGPL-3.0 license)",
+     "LICENSES/android/GPL-3.0.txt"),
+    ("GCC Runtime Library Exception 3.1 (applies to chaquopy-libgfortran)",
+     "LICENSES/android/GCC-exception-3.1.txt"),
 )
 
 DEFAULT_PIP_SUBDIR = "android/app/build/python/pip/release/common"
