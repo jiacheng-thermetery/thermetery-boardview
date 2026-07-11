@@ -95,6 +95,54 @@ class SyntheticSegment:
 # Pin world-coord resolution
 # --------------------------------------------------------------------------
 
+_PinTransform = Tuple[float, float, Optional[float], Optional[float]]
+
+
+def _component_pin_transform(component) -> _PinTransform:
+    """Return the invariant transform used for every pin on ``component``.
+
+    ``cos``/``sin`` are ``None`` for an unrotated component so the hot path
+    retains the original direct-add arithmetic exactly.  This matters both
+    for speed and for preserving the old floating-point results bit-for-bit.
+    """
+    rot = component.rotation or 0.0
+    if rot == 0.0:
+        return (component.x, component.y, None, None)
+    rot_rad = math.radians(rot)
+    return (
+        component.x,
+        component.y,
+        math.cos(rot_rad),
+        math.sin(rot_rad),
+    )
+
+
+def _apply_pin_transform(
+    transform: _PinTransform, dx: float, dy: float,
+) -> Tuple[float, float]:
+    """Apply a cached component transform to one footprint-local pin."""
+    cx, cy, cos_r, sin_r = transform
+    if cos_r is None or sin_r is None:
+        return (cx + dx, cy + dy)
+    wx = cx + cos_r * dx - sin_r * dy
+    wy = cy + sin_r * dx + cos_r * dy
+    return (wx, wy)
+
+
+def _shape_pin_index(shape) -> Dict[str, Tuple[float, float]]:
+    """Build ``pin name -> local (x, y)`` while keeping the first duplicate.
+
+    The legacy linear lookup used ``next(...)``, so duplicate pin names
+    resolved to their first occurrence.  An explicit membership check (rather
+    than a dict comprehension) preserves that behaviour and insertion order.
+    """
+    index: Dict[str, Tuple[float, float]] = {}
+    for name, dx, dy in shape.pins:
+        if name not in index:
+            index[name] = (dx, dy)
+    return index
+
+
 def _pin_world_xy(component, shape, pin_name: str) -> Optional[Tuple[float, float]]:
     """Resolve `(refdes, pin_name)` to its world (x, y) by applying the
     component's rotation around its origin. Returns None if the pin name
@@ -105,15 +153,7 @@ def _pin_world_xy(component, shape, pin_name: str) -> Optional[Tuple[float, floa
     if pin is None:
         return None
     _, dx, dy = pin
-    rot = component.rotation or 0.0
-    if rot == 0.0:
-        return (component.x + dx, component.y + dy)
-    rot_rad = math.radians(rot)
-    cos_r = math.cos(rot_rad)
-    sin_r = math.sin(rot_rad)
-    wx = component.x + cos_r * dx - sin_r * dy
-    wy = component.y + sin_r * dx + cos_r * dy
-    return (wx, wy)
+    return _apply_pin_transform(_component_pin_transform(component), dx, dy)
 
 
 # --------------------------------------------------------------------------
@@ -479,6 +519,15 @@ def build_synthetic_topology(model) -> SyntheticTraceGraph:
     segments: List[SyntheticSegment] = []
     next_seg_id = 0
 
+    # The same footprint is commonly shared by hundreds of passives, and a
+    # large BGA can contribute hundreds of pins across many nets.  The former
+    # `_pin_world_xy` call linearly scanned `shape.pins` for every signal node,
+    # making a K-pin component O(K²).  Build each used shape's first-match pin
+    # index once, and likewise compute each used component's rotation matrix
+    # once.  Both caches are local to this immutable, one-shot topology build.
+    pin_index_by_shape: Dict[str, Dict[str, Tuple[float, float]]] = {}
+    transform_by_refdes: Dict[str, _PinTransform] = {}
+
     for net_name, nodes in model.signals.items():
         if not net_name or len(nodes) < 2:
             continue
@@ -492,9 +541,18 @@ def build_synthetic_topology(model) -> SyntheticTraceGraph:
             shape = model.shapes.get(comp.shape)
             if shape is None:
                 continue
-            xy = _pin_world_xy(comp, shape, pin_name)
-            if xy is None:
+            pin_index = pin_index_by_shape.get(comp.shape)
+            if pin_index is None:
+                pin_index = _shape_pin_index(shape)
+                pin_index_by_shape[comp.shape] = pin_index
+            pin_xy = pin_index.get(pin_name)
+            if pin_xy is None:
                 continue
+            transform = transform_by_refdes.get(refdes)
+            if transform is None:
+                transform = _component_pin_transform(comp)
+                transform_by_refdes[refdes] = transform
+            xy = _apply_pin_transform(transform, pin_xy[0], pin_xy[1])
             points.append((xy[0], xy[1], comp.layer))
 
         if len(points) < 2:

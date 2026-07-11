@@ -1,7 +1,7 @@
 project(
   'thermetery-boardviewer',
   'c',
-  version : '0.1.0',
+  version : '1.0.0',
   default_options : [
     'warning_level=3',
     'c_std=c11',
@@ -9,21 +9,29 @@ project(
   ],
 )
 
+# MinGW applies the Unix-style `lib` prefix to Windows DLLs by default,
+# while the Python loaders and release layout use `tvw_native.dll`, etc.
+# Keep the normal `lib` prefix on Unix-like platforms only.
+native_name_prefix = host_machine.system() == 'windows' ? '' : 'lib'
+
 tvw_native_lib = shared_library(
   'tvw_native',
   'src/parsers/native/tvw_native.c',
+  name_prefix : native_name_prefix,
   install : false,
 )
 
 xzz_native_lib = shared_library(
   'xzz_native',
   'src/parsers/native/xzz_native.c',
+  name_prefix : native_name_prefix,
   install : false,
 )
 
 rc6_native_lib = shared_library(
   'rc6_native',
   'src/parsers/native/rc6_native.c',
+  name_prefix : native_name_prefix,
   install : false,
 )
 

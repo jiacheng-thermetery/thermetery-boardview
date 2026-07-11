@@ -4,10 +4,10 @@
  * No external/network dependencies; runs from file:///android_asset offline.
  *
  * Renders board JSON onto a single canvas sized to devicePixelRatio.
- * Heavy static geometry (segments, vias, pins) is pre-rendered into an
- * offscreen raster at the settled view; during gestures the raster is
- * blitted with a delta transform and re-rasterized ~150 ms after the
- * gesture settles. Component outlines / refdes labels draw live above.
+ * Static geometry (segments, vias, pins, component outlines, refdes) is
+ * pre-rendered into an offscreen raster at the settled view; during gestures
+ * the raster is blitted with a delta transform and re-rasterized ~150 ms
+ * after the gesture settles. Only the current selection draws live above.
  */
 "use strict";
 (function () {
@@ -277,6 +277,7 @@
     for (i = 0; i < comps.length; i++) nPins += (comps[i].pins || []).length;
     var pinX = new Float64Array(nPins), pinY = new Float64Array(nPins);
     var pinNet = new Int32Array(nPins), pinComp = new Int32Array(nPins);
+    var pinsByNet = new Array(nets.length);
     var k = 0;
     for (i = 0; i < comps.length; i++) {
       var cc = comps[i];
@@ -299,10 +300,26 @@
         pinX[k] = pp[j].x;
         pinY[k] = pp[j].y;
         pinNet[k] = (typeof pp[j].net === "number") ? pp[j].net : -1;
+        var netIdx = pinNet[k];
         pinComp[k] = i;
+        if (netIdx >= 0 && netIdx < pinsByNet.length) {
+          (pinsByNet[netIdx] || (pinsByNet[netIdx] = [])).push(k);
+        }
         k++;
       }
     }
+
+    // Exact x-sorted pin index. Tap hit-testing binary-searches the x range,
+    // then performs the original Euclidean-distance test on that subset.
+    var pinOrder = [];
+    for (i = 0; i < nPins; i++) {
+      if (isFinite(pinX[i]) && isFinite(pinY[i])) pinOrder.push(i);
+    }
+    pinOrder.sort(function (a, bx) {
+      var dx = pinX[a] - pinX[bx];
+      return dx || (a - bx);
+    });
+    var pinOrderX = new Int32Array(pinOrder);
 
     var b = {
       meta: meta,
@@ -313,6 +330,7 @@
       bbox: bb,
       nPins: nPins,
       pinX: pinX, pinY: pinY, pinNet: pinNet, pinComp: pinComp,
+      pinsByNet: pinsByNet, pinOrderX: pinOrderX,
       diag: Math.hypot(bb[2] - bb[0], bb[3] - bb[1]) || 1,
       synthetic: !!obj.synthetic
     };
@@ -383,6 +401,21 @@
     t.viaY = new Float64Array(v.y || []);
     t.viaNet = new Int32Array(v.net || []);
     t.nVias = t.viaX.length;
+    var netCount = board ? board.nets.length : 0;
+    t.segmentsByNet = new Array(netCount);
+    t.viasByNet = new Array(netCount);
+    for (var i = 0; i < t.n; i++) {
+      var sn = t.net[i];
+      if (sn >= 0 && sn < netCount) {
+        (t.segmentsByNet[sn] || (t.segmentsByNet[sn] = [])).push(i);
+      }
+    }
+    for (i = 0; i < t.nVias; i++) {
+      var vn = t.viaNet[i];
+      if (vn >= 0 && vn < netCount) {
+        (t.viasByNet[vn] || (t.viasByNet[vn] = [])).push(i);
+      }
+    }
     return t;
   }
 
@@ -494,11 +527,15 @@
    *  Canvas sizing
    * ------------------------------------------------------------------ */
   function resizeCanvas() {
-    dpr = Math.max(1, window.devicePixelRatio || 1);
-    cssW = window.innerWidth;
-    cssH = window.innerHeight;
-    var w = Math.max(1, Math.round(cssW * dpr));
-    var h = Math.max(1, Math.round(cssH * dpr));
+    var nextDpr = Math.max(1, window.devicePixelRatio || 1);
+    var nextCssW = window.innerWidth, nextCssH = window.innerHeight;
+    var w = Math.max(1, Math.round(nextCssW * nextDpr));
+    var h = Math.max(1, Math.round(nextCssH * nextDpr));
+    if (nextDpr === dpr && nextCssW === cssW && nextCssH === cssH &&
+        canvas.width === w && canvas.height === h) return;
+    dpr = nextDpr;
+    cssW = nextCssW;
+    cssH = nextCssH;
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
@@ -513,7 +550,7 @@
   }
 
   /* ------------------------------------------------------------------ *
-   *  Offscreen raster of static geometry (segments + vias + pins)
+   *  Offscreen raster of static geometry (traces, pins, components, labels)
    * ------------------------------------------------------------------ */
   function rasterize() {
     if (!board || cssW < 2 || cssH < 2) { raster.valid = false; return; }
@@ -569,11 +606,9 @@
     if (traces && showTraces && traces.n) {
       var t = traces;
       var batches = {};            // key -> [i, i, ...]
-      var hlIdx = [];
       for (var i = 0; i < t.n; i++) {
         var li = t.layer[i];
-        var isHl = dimming && t.net[i] === hlNet;
-        if (isHl) { hlIdx.push(i); continue; }     // highlighted: all layers
+        if (dimming && t.net[i] === hlNet) continue; // bright pass below
         if (layerIdx >= 0 && li !== layerIdx) continue;
         // cull
         var ax = t.x1[i] * k + tx, ay = -t.y1[i] * k + ty;
@@ -606,19 +641,27 @@
       }
       g.globalAlpha = 1;
       // highlighted net segments: bright, on every layer, drawn above
-      if (hlIdx.length) {
+      var hlIdx = dimming && t.segmentsByNet ? t.segmentsByNet[hlNet] : null;
+      if (hlIdx && hlIdx.length) {
         g.strokeStyle = TRACE_HIGHLIGHT;
         g.beginPath();
-        var hw = 0;
+        var hw = 0, anyHl = false;
         for (q = 0; q < hlIdx.length; q++) {
           s = hlIdx[q];
+          ax = t.x1[s] * k + tx; ay = -t.y1[s] * k + ty;
+          bx2 = t.x2[s] * k + tx; by2 = -t.y2[s] * k + ty;
+          if ((ax < L && bx2 < L) || (ax > R && bx2 > R) ||
+              (ay < T && by2 < T) || (ay > B && by2 > B)) continue;
           var w2 = t.width[s] * k * 1.2;
           if (w2 > hw) hw = w2;
-          g.moveTo(t.x1[s] * k + tx, -t.y1[s] * k + ty);
-          g.lineTo(t.x2[s] * k + tx, -t.y2[s] * k + ty);
+          g.moveTo(ax, ay);
+          g.lineTo(bx2, by2);
+          anyHl = true;
         }
-        g.lineWidth = Math.max(2, Math.min(hw, 20));
-        g.stroke();
+        if (anyHl) {
+          g.lineWidth = Math.max(2, Math.min(hw, 20));
+          g.stroke();
+        }
       }
       g.setLineDash([]);
 
@@ -638,8 +681,9 @@
         g.globalAlpha = 1;
         if (dimming) {
           g.fillStyle = HIGHLIGHT;
-          for (i = 0; i < t.nVias; i++) {
-            if (t.viaNet[i] !== hlNet) continue;
+          var hlVias = t.viasByNet ? t.viasByNet[hlNet] : null;
+          for (q = 0; hlVias && q < hlVias.length; q++) {
+            i = hlVias[q];
             vx = t.viaX[i] * k + tx; vy = -t.viaY[i] * k + ty;
             if (vx < L || vx > R || vy < T || vy > B) continue;
             g.beginPath();
@@ -684,8 +728,9 @@
     if (dimming) {
       g.fillStyle = HIGHLIGHT;
       lastComp = -1; r = 1;
-      for (i = 0; i < board.nPins; i++) {
-        if (pn[i] !== hlNet) continue;
+      var hlPins = board.pinsByNet[hlNet];
+      for (var hi = 0; hlPins && hi < hlPins.length; hi++) {
+        i = hlPins[hi];
         ci = pcArr[i];
         if (ci !== lastComp) {
           lastComp = ci;
@@ -700,6 +745,11 @@
         g.fill();
       }
     }
+
+    // Component outlines and refdes are static for a settled view. Capture
+    // them above pins, matching the old live draw order, so gesture frames
+    // only composite this raster and the current selection overlay.
+    drawComponents(g, k, tx, ty, L, T, R, B);
 
     raster.valid = true;
     needRaster = false;
@@ -759,66 +809,93 @@
                     raster.canvas.height * K / raster.dpr);
     }
 
-    drawComponents();
     drawSelection();
     ctx.restore();
   }
 
-  function drawComponents() {
+  function drawComponents(g, k, tx, ty, L, T, R, B) {
     var comps = board.comps;
-    var k = view.k, tx = view.tx, ty = view.ty;
     var n = comps.length;
     var dimming = (hlNet >= 0);
-    var skipLabels = gestureActive && n > 3500;
     var labelBudget = 400;
+    var labelFlags = new Uint8Array(n);
     var lastFont = 0;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.lineWidth = 1;
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.lineWidth = 1;
 
+    // Preserve the old visible-viewport label selection before assigning any
+    // remaining budget to the capture margin used during gestures.
     for (var i = 0; i < n; i++) {
       var c = comps[i];
       var bb = c.bbox;
       var x = bb[0] * k + tx, y = -bb[3] * k + ty;
       var w = (bb[2] - bb[0]) * k, h = (bb[3] - bb[1]) * k;
       if (x > cssW || y > cssH || x + w < 0 || y + h < 0) continue;
+      var ghost = (layerIdx >= 0 && c.layer !== layerIdx);
+      if (!ghost && (w > h ? w : h) >= LABEL_MIN_PX) {
+        labelFlags[i] = 1;
+        if (--labelBudget === 0) break;
+      }
+    }
+    if (labelBudget > 0) {
+      for (i = 0; i < n; i++) {
+        c = comps[i];
+        bb = c.bbox;
+        x = bb[0] * k + tx; y = -bb[3] * k + ty;
+        w = (bb[2] - bb[0]) * k; h = (bb[3] - bb[1]) * k;
+        if (x <= cssW && y <= cssH && x + w >= 0 && y + h >= 0) continue;
+        if (x > R || y > B || x + w < L || y + h < T) continue;
+        ghost = (layerIdx >= 0 && c.layer !== layerIdx);
+        if (!ghost && (w > h ? w : h) >= LABEL_MIN_PX) {
+          labelFlags[i] = 1;
+          if (--labelBudget === 0) break;
+        }
+      }
+    }
+
+    for (i = 0; i < n; i++) {
+      c = comps[i];
+      bb = c.bbox;
+      x = bb[0] * k + tx; y = -bb[3] * k + ty;
+      w = (bb[2] - bb[0]) * k; h = (bb[3] - bb[1]) * k;
+      if (x > R || y > B || x + w < L || y + h < T) continue;
       var sizePx = w > h ? w : h;
       if (sizePx < 2.5) continue;
-      var ghost = (layerIdx >= 0 && c.layer !== layerIdx);
+      ghost = (layerIdx >= 0 && c.layer !== layerIdx);
       var alpha = ghost ? GHOST_ALPHA : 1;
       if (dimming) alpha *= DIM_ALPHA;
-      ctx.globalAlpha = alpha;
-      ctx.strokeStyle = ghost ? GHOST_OUTLINE
-                       : (c.layer === 1 ? BOTTOM_COLOR : TOP_COLOR);
+      g.globalAlpha = alpha;
+      g.strokeStyle = ghost ? GHOST_OUTLINE
+                     : (c.layer === 1 ? BOTTOM_COLOR : TOP_COLOR);
       var ol = c.outline;
       if (ol && ol.length > 2 && sizePx > 6) {
-        ctx.beginPath();
-        ctx.moveTo(ol[0][0] * k + tx, -ol[0][1] * k + ty);
+        g.beginPath();
+        g.moveTo(ol[0][0] * k + tx, -ol[0][1] * k + ty);
         for (var j = 1; j < ol.length; j++) {
-          ctx.lineTo(ol[j][0] * k + tx, -ol[j][1] * k + ty);
+          g.lineTo(ol[j][0] * k + tx, -ol[j][1] * k + ty);
         }
-        ctx.closePath();
-        ctx.stroke();
+        g.closePath();
+        g.stroke();
       } else {
-        ctx.strokeRect(x, y, w, h);
+        g.strokeRect(x, y, w, h);
       }
       // refdes label: only when the component exceeds the 18 px rule
-      if (!ghost && !skipLabels && labelBudget > 0 && sizePx >= LABEL_MIN_PX) {
+      if (labelFlags[i]) {
         var fs = sizePx * 0.18;
         if (fs < 9) fs = 9;
         if (fs > 12) fs = 12;
         fs = fs | 0;
         if (fs !== lastFont) {
-          ctx.font = "bold " + fs + "px Consolas, monospace";
+          g.font = "bold " + fs + "px Consolas, monospace";
           lastFont = fs;
         }
-        ctx.fillStyle = (c.layer === 1 ? LABEL_BOTTOM : LABEL_TOP);
-        ctx.fillText(c.ref, x + w / 2, y + h / 2);
-        labelBudget--;
+        g.fillStyle = (c.layer === 1 ? LABEL_BOTTOM : LABEL_TOP);
+        g.fillText(c.ref, x + w / 2, y + h / 2);
       }
     }
-    ctx.globalAlpha = 1;
-    ctx.textAlign = "left";
+    g.globalAlpha = 1;
+    g.textAlign = "left";
   }
 
   function drawSelection() {
@@ -891,13 +968,28 @@
     var radW = TAP_RADIUS_CSS / view.k;
     var rad2 = radW * radW;
 
-    // nearest pin within the tap radius
+    // Nearest pin within the tap radius. Pin x coordinates are sorted once
+    // during ingestion, so only the exact x window needs a distance check.
     var bestPin = -1, bestD2 = rad2;
     var px = board.pinX, py = board.pinY;
-    for (var i = 0; i < board.nPins; i++) {
+    var order = board.pinOrderX;
+    var minX = wx - radW, maxX = wx + radW;
+    var lo = 0, hi = order.length;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (px[order[mid]] < minX) lo = mid + 1;
+      else hi = mid;
+    }
+    var i;
+    for (var oi = lo; oi < order.length; oi++) {
+      i = order[oi];
+      if (px[i] > maxX) break;
       var dx = px[i] - wx, dy = py[i] - wy;
       var d2 = dx * dx + dy * dy;
-      if (d2 < bestD2) { bestD2 = d2; bestPin = i; }
+      if (d2 < bestD2 || (bestPin >= 0 && d2 === bestD2 && i < bestPin)) {
+        bestD2 = d2;
+        bestPin = i;
+      }
     }
     if (bestPin >= 0) {
       var pci = board.pinComp[bestPin];
@@ -963,18 +1055,16 @@
     elPanelMeta.textContent = c.pinCount + " pin" + (c.pinCount === 1 ? "" : "s") +
       "  ·  " + lay +
       (c.rotation ? "  ·  " + c.rotation + "°" : "");
-    buildPinRows(c);
-    elPanel.classList.add("open");
     // Tapping a pin reveals its net in the Net tab; tapping a body stays on Pins.
     var pinNet = (sel.pin >= 0) ? board.pinNet[c.pinStart + sel.pin] : -1;
     if (focusNet && pinNet >= 0) {
-      setHighlight(pinNet);
-      buildNetTab(pinNet);   // refresh selection marker even if net unchanged
-      showTab("net");
-    } else {
-      buildNetTab(hlNet);
-      showTab("pins");
+      // The panel is rebuilt once below with the new highlight state.
+      setHighlight(pinNet, false);
     }
+    buildPinRows(c);
+    buildNetTab(hlNet);
+    showTab(focusNet && pinNet >= 0 ? "net" : "pins");
+    elPanel.classList.add("open");
     if (center) {
       var bb = c.bbox;
       var maxDim = Math.max(bb[2] - bb[0], bb[3] - bb[1], board.pitch * 2);
@@ -1037,18 +1127,14 @@
       elPanelNet.appendChild(empty);
       return;
     }
-    var members = [], parts = {};
-    for (var i = 0; i < board.nPins; i++) {
-      if (board.pinNet[i] !== net) continue;
-      var ci = board.pinComp[i];
-      var c = board.comps[ci];
-      var local = i - c.pinStart;
-      var pname = (c.pins[local] && c.pins[local].name != null)
-        ? String(c.pins[local].name) : String(local + 1);
-      members.push({ ci: ci, local: local, ref: c.ref, name: pname });
-      parts[ci] = true;
+    var members = board.pinsByNet[net] || [];
+    // Pin indices are appended component-by-component during ingestion, so
+    // distinct component runs give the part count without an all-pin scan.
+    var nParts = 0, lastCi = -1;
+    for (var i = 0; i < members.length; i++) {
+      var memberCi = board.pinComp[members[i]];
+      if (memberCi !== lastCi) { nParts++; lastCi = memberCi; }
     }
-    var nParts = 0; for (var p in parts) nParts++;
     var frag = document.createDocumentFragment();
     var head = document.createElement("div");
     head.className = "bv-nethead";
@@ -1063,18 +1149,23 @@
     frag.appendChild(head);
     var nRows = Math.min(members.length, MAX_NET_ROWS);
     for (i = 0; i < nRows; i++) {
-      var m = members[i];
+      var pi = members[i];
+      var ci = board.pinComp[pi];
+      var c = board.comps[ci];
+      var local = pi - c.pinStart;
+      var pname = (c.pins[local] && c.pins[local].name != null)
+        ? String(c.pins[local].name) : String(local + 1);
       var row = document.createElement("div");
       row.className = "bv-netrow";
-      if (sel && sel.ci === m.ci && sel.pin === m.local) row.className += " sel";
-      row.dataset.ci = m.ci;
-      row.dataset.pin = m.local;
+      if (sel && sel.ci === ci && sel.pin === local) row.className += " sel";
+      row.dataset.ci = ci;
+      row.dataset.pin = local;
       var rr = document.createElement("span");
       rr.className = "bv-netref";
-      rr.textContent = m.ref;
+      rr.textContent = c.ref;
       var rp = document.createElement("span");
       rp.className = "bv-netpin";
-      rp.textContent = m.name;
+      rp.textContent = pname;
       row.appendChild(rr); row.appendChild(rp);
       frag.appendChild(row);
     }
@@ -1140,14 +1231,17 @@
     scheduleRender();
   }
 
-  function setHighlight(net) {
-    if (net === hlNet) return;
+  function setHighlight(net, refreshPanel) {
+    if (net === hlNet) return false;
     hlNet = net;
     updateChip();
-    if (sel) buildPinRows(board.comps[sel.ci]);
-    buildNetTab(hlNet);
+    if (refreshPanel !== false) {
+      if (sel) buildPinRows(board.comps[sel.ci]);
+      buildNetTab(hlNet);
+    }
     needRaster = true;
     scheduleRender();
+    return true;
   }
 
   function updateChip() {
@@ -1165,8 +1259,9 @@
 
   function centerNet(net) {
     var minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
-    for (var i = 0; i < board.nPins; i++) {
-      if (board.pinNet[i] !== net) continue;
+    var pinMembers = board.pinsByNet[net];
+    for (var mi = 0; pinMembers && mi < pinMembers.length; mi++) {
+      var i = pinMembers[mi];
       var x = board.pinX[i], y = board.pinY[i];
       if (x < minx) minx = x;
       if (y < miny) miny = y;
@@ -1174,8 +1269,9 @@
       if (y > maxy) maxy = y;
     }
     if (traces) {
-      for (i = 0; i < traces.n; i++) {
-        if (traces.net[i] !== net) continue;
+      var segMembers = traces.segmentsByNet[net];
+      for (mi = 0; segMembers && mi < segMembers.length; mi++) {
+        i = segMembers[mi];
         if (traces.x1[i] < minx) minx = traces.x1[i];
         if (traces.y1[i] < miny) miny = traces.y1[i];
         if (traces.x1[i] > maxx) maxx = traces.x1[i];
@@ -1492,7 +1588,7 @@
     if (hitEnt.type === "comp") {
       selectComp(hitEnt.idx, -1, true);
     } else {
-      setHighlight(hitEnt.idx);
+      setHighlight(hitEnt.idx, false);
       centerNet(hitEnt.idx);
       openNetPanel(hitEnt.idx);
     }

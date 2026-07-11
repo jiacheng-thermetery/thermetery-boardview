@@ -1004,7 +1004,7 @@ def _build_pad_index_py(data: bytes) -> Dict[Tuple[int, int], int]:
 # Public entry point
 # --------------------------------------------------------------------------
 
-def parse(path: Path) -> BoardModel:
+def parse(path: Path, data: Optional[bytes] = None) -> BoardModel:
     """Parse a Compal/Lenovo TVW file into a BoardModel.
 
     Produces chips with correct positions, rotations, layers,
@@ -1021,8 +1021,12 @@ def parse(path: Path) -> BoardModel:
 
     Pins whose predicted world coord doesn't match any pad are treated
     as no-connect (NC) and don't appear in `model.signals`.
+
+    ``data`` accepts the buffer already read by the TVW variant dispatcher.
+    It remains optional so direct callers retain the historical path-only API.
     """
-    data = Path(path).read_bytes()
+    if data is None:
+        data = Path(path).read_bytes()
     model = BoardModel()
 
     masters = _scan_master_pool(data)

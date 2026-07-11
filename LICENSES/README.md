@@ -10,6 +10,14 @@ the upstream license in full as required.
 | `OpenBoardView-MIT.txt` | https://github.com/OpenBoardView/OpenBoardView (MIT) | `xzzpcb_parser.py` — parser logic and record schema for XZZPCB `.pcb` files; `rc6_native.c` — C port of `FZFile::decode` (RC6-CFB-1 cipher used by ASUS `.fz` files); `fz_parser.py` (the RC6 cipher pieces only — `_RC6_PARITY`, `_validate_fz_key`, `_rc6_decode` — pure-Python fallback for the same cipher) |
 | `dhuertas-DES-MIT.txt`  | https://github.com/dhuertas/DES (MIT)               | `xzzpcb_parser.py` (pure-Python DES fallback) and `xzz_native.c` (the C fast path compiled into `xzz_native.dll`) — both port the same DES reference implementation |
 
+## Packaged runtime licenses
+
+| File | Upstream | Used in |
+| ---- | -------- | ------- |
+| `PyOpenGL-BSD.txt` | https://github.com/mcfletch/pyopengl/tree/3.1.10 | PyOpenGL 3.1.10 runtime bundled in Windows releases |
+| `Tcl-8.6.txt` | https://github.com/tcltk/tcl/tree/core-8-6-15 | Tcl 8.6 runtime bundled in Windows releases |
+| `Tk-8.6.txt` | https://github.com/tcltk/tk/tree/core-8-6-15 | Tk 8.6 runtime bundled in Windows releases |
+
 The project itself is **LGPL-3.0-or-later** (`LICENSE` at the repository root).
 
 The fully ported source files (`xzzpcb_parser.py`, `xzz_native.c`, and
@@ -28,6 +36,11 @@ The rest of the codebase is LGPL.
 
 The MIT permission notices reproduced here satisfy MIT's "copyright notice
 and this permission notice shall be included" clause.
+
+Windows binary releases also collect the installed license files for CPython,
+NumPy, skia-python, pyopengltk, tkinterdnd2, and the PyInstaller bootloader.
+The committed PyOpenGL/Tcl/Tk texts above are pinned fallbacks for wheels or
+Python distributions which do not expose those notices as package metadata.
 
 ## Courtesy attribution (no derived code)
 

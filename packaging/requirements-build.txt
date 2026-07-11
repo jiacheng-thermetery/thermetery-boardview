@@ -1,0 +1,10 @@
+numpy==2.5.1
+skia-python==144.0.post2
+pyopengltk==0.0.4
+PyOpenGL==3.1.10
+tkinterdnd2==0.6.2
+meson==1.11.2
+ninja==1.13.0
+PyInstaller==6.21.0
+pyinstaller-hooks-contrib==2026.6
+Pillow==12.3.0

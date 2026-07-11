@@ -238,7 +238,7 @@ class KeyManagerActivity : ComponentActivity() {
             }
             runOnUiThread {
                 val status = applyValidation(slot, result)
-                if (status == "malformed" || status == "error") {
+                if (status != "valid" && status != "unverified") {
                     // Definitively not a key — refuse to store junk.
                     toast("Not saved — the key is not well-formed.")
                 } else {

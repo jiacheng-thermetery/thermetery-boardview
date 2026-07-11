@@ -134,21 +134,39 @@ def _units_per_mm(model: BoardModel) -> Optional[float]:
     # defaults to 39.37 when there are no components; the contract wants
     # null when the scale is not actually known, so an empty model
     # reports null instead.
-    xs = [c.x for c in model.components.values()]
-    ys = [c.y for c in model.components.values()]
-    if not xs:
+    components = iter(model.components.values())
+    first = next(components, None)
+    if first is None:
         return None
-    span = max(max(xs) - min(xs), max(ys) - min(ys))
+    min_x = max_x = _num(first.x)
+    min_y = max_y = _num(first.y)
+    for comp in components:
+        x, y = _num(comp.x), _num(comp.y)
+        if x < min_x:
+            min_x = x
+        elif x > max_x:
+            max_x = x
+        if y < min_y:
+            min_y = y
+        elif y > max_y:
+            max_y = y
+    span = max(max_x - min_x, max_y - min_y)
     return 3937.0 if span > 50_000 else 39.37
 
 
-def _component_outline(comp, shape) -> Optional[List[List[float]]]:
+def _component_outline(
+    comp,
+    shape,
+    *,
+    local_bbox: Optional[Tuple[float, float, float, float]] = None,
+    transform: Optional[Tuple[float, float, float, float]] = None,
+) -> Optional[List[List[float]]]:
     """Absolute outline polygon — replicates viewer.py:883-904
     (_component_polygon_world): shape bbox + 5-unit pad, 4 corners
     rotated about the component origin. None => renderer uses bbox."""
     if shape is None or not shape.pins:
         return None
-    x0, y0, x1, y1 = shape.bbox()
+    x0, y0, x1, y1 = local_bbox if local_bbox is not None else shape.bbox()
     if (x1 - x0) < 0.5 and (y1 - y0) < 0.5:
         return None
     pad = 5
@@ -157,9 +175,12 @@ def _component_outline(comp, shape) -> Optional[List[List[float]]]:
     x1 += pad
     y1 += pad
     corners = ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
-    theta = math.radians(_num(comp.rotation))
-    ct, st = math.cos(theta), math.sin(theta)
-    cx, cy = _num(comp.x), _num(comp.y)
+    if transform is None:
+        theta = math.radians(_num(comp.rotation))
+        ct, st = math.cos(theta), math.sin(theta)
+        cx, cy = _num(comp.x), _num(comp.y)
+    else:
+        cx, cy, ct, st = transform
     return [[cx + rx * ct - ry * st, cy + rx * st + ry * ct]
             for rx, ry in corners]
 
@@ -225,42 +246,78 @@ def _open_board(path: str, key: Optional[str]) -> str:
     components: List[Dict[str, Any]] = []
     bb_minx = bb_miny = math.inf
     bb_maxx = bb_maxy = -math.inf
+    comp_minx = comp_miny = math.inf
+    comp_maxx = comp_maxy = -math.inf
+    # A board commonly instantiates the same footprint hundreds of times.
+    # Shape geometry is immutable after parsing, so cache its local bounds.
+    shape_bbox_cache: Dict[str, Tuple[float, float, float, float]] = {}
 
     for refdes, comp in model.components.items():
         shape = model.shapes.get(comp.shape) if comp.shape else None
         cx, cy = _num(comp.x), _num(comp.y)
+        if cx < comp_minx:
+            comp_minx = cx
+        if cx > comp_maxx:
+            comp_maxx = cx
+        if cy < comp_miny:
+            comp_miny = cy
+        if cy > comp_maxy:
+            comp_maxy = cy
         # Pin world transform — viewer.py:1720-1726 (see module docstring).
-        theta = math.radians(_num(comp.rotation))
+        rotation = _num(comp.rotation)
+        theta = math.radians(rotation)
         ct, st = math.cos(theta), math.sin(theta)
 
         pins: List[Dict[str, Any]] = []
+        pin_minx = pin_miny = math.inf
+        pin_maxx = pin_maxy = -math.inf
         if shape is not None:
             for pin_name, dx, dy in shape.pins:
                 dx = _num(dx)
                 dy = _num(dy)
                 wx = cx + dx * ct - dy * st
                 wy = cy + dx * st + dy * ct
+                name = str(pin_name)
                 pins.append({
-                    "name": str(pin_name),
+                    "name": name,
                     "x": wx,
                     "y": wy,
-                    "net": pin_net.get((refdes, str(pin_name)), -1),
+                    "net": pin_net.get((refdes, name), -1),
                 })
+                if wx < pin_minx:
+                    pin_minx = wx
+                if wx > pin_maxx:
+                    pin_maxx = wx
+                if wy < pin_miny:
+                    pin_miny = wy
+                if wy > pin_maxy:
+                    pin_maxy = wy
 
-        outline = _component_outline(comp, shape)
+        local_bbox = None
+        if shape is not None and shape.pins:
+            local_bbox = shape_bbox_cache.get(comp.shape)
+            if local_bbox is None:
+                local_bbox = shape.bbox()
+                shape_bbox_cache[comp.shape] = local_bbox
+        outline = _component_outline(
+            comp,
+            shape,
+            local_bbox=local_bbox,
+            transform=(cx, cy, ct, st),
+        )
 
         # Component bbox: prefer the outline polygon (what the desktop
         # hit-tests against, viewer.py:914-918 _bbox_of_points over the
         # polygon); fall back to the absolute pin extent, then to the
         # origin point for shapeless components.
         if outline is not None:
-            oxs = [pt[0] for pt in outline]
-            oys = [pt[1] for pt in outline]
-            cbb = [min(oxs), min(oys), max(oxs), max(oys)]
+            outline_minx = min(pt[0] for pt in outline)
+            outline_miny = min(pt[1] for pt in outline)
+            outline_maxx = max(pt[0] for pt in outline)
+            outline_maxy = max(pt[1] for pt in outline)
+            cbb = [outline_minx, outline_miny, outline_maxx, outline_maxy]
         elif pins:
-            pxs = [pp["x"] for pp in pins]
-            pys = [pp["y"] for pp in pins]
-            cbb = [min(pxs), min(pys), max(pxs), max(pys)]
+            cbb = [pin_minx, pin_miny, pin_maxx, pin_maxy]
         else:
             cbb = [cx, cy, cx, cy]
 
@@ -269,25 +326,23 @@ def _open_board(path: str, key: Optional[str]) -> str:
             "x": cx,
             "y": cy,
             "layer": _layer_index(comp.layer),
-            "rotation": _num(comp.rotation),
+            "rotation": rotation,
             "bbox": cbb,
             "outline": outline,
             "pins": pins,
         })
 
         # meta.bbox accumulates pins + outlines (contract SS1).
-        for pp in pins:
-            px, py = pp["x"], pp["y"]
-            if px < bb_minx: bb_minx = px
-            if px > bb_maxx: bb_maxx = px
-            if py < bb_miny: bb_miny = py
-            if py > bb_maxy: bb_maxy = py
+        if pins:
+            if pin_minx < bb_minx: bb_minx = pin_minx
+            if pin_maxx > bb_maxx: bb_maxx = pin_maxx
+            if pin_miny < bb_miny: bb_miny = pin_miny
+            if pin_maxy > bb_maxy: bb_maxy = pin_maxy
         if outline is not None:
-            for px, py in outline:
-                if px < bb_minx: bb_minx = px
-                if px > bb_maxx: bb_maxx = px
-                if py < bb_miny: bb_miny = py
-                if py > bb_maxy: bb_maxy = py
+            if outline_minx < bb_minx: bb_minx = outline_minx
+            if outline_maxx > bb_maxx: bb_maxx = outline_maxx
+            if outline_miny < bb_miny: bb_miny = outline_miny
+            if outline_maxy > bb_maxy: bb_maxy = outline_maxy
 
     # Board outline segments (XZZ stashes them on the model,
     # xzzpcb_parser.py:846) also count toward the overall bounds.
@@ -304,6 +359,12 @@ def _open_board(path: str, key: Optional[str]) -> str:
     else:
         bbox = [bb_minx, bb_miny, bb_maxx, bb_maxy]
 
+    if components:
+        component_span = max(comp_maxx - comp_minx, comp_maxy - comp_miny)
+        units_per_mm = 3937.0 if component_span > 50_000 else 39.37
+    else:
+        units_per_mm = None
+
     out = {
         "ok": True,
         "version": 1,
@@ -311,7 +372,7 @@ def _open_board(path: str, key: Optional[str]) -> str:
             "title": p.stem,
             "format": fmt,
             "warnings": [str(w) for w in (getattr(model, "warnings", None) or [])],
-            "units_per_mm": _units_per_mm(model),
+            "units_per_mm": units_per_mm,
             "bbox": bbox,
             "traces_available": bool(model.topology_available),
         },
@@ -320,13 +381,18 @@ def _open_board(path: str, key: Optional[str]) -> str:
         "components": components,
     }
 
-    _STATE["model"] = model
-    _STATE["path"] = p
-    _STATE["format"] = fmt
-    _STATE["nets"] = nets
-    _STATE["net_index"] = net_index
-
-    return json.dumps(out, separators=_COMPACT)
+    # Serialize before publishing the model.  If a very large payload cannot
+    # be encoded, the UI still shows the previous board and load_traces()
+    # must therefore keep referring to that same previous board.
+    payload = json.dumps(out, separators=_COMPACT)
+    _STATE.update({
+        "model": model,
+        "path": p,
+        "format": fmt,
+        "nets": nets,
+        "net_index": net_index,
+    })
+    return payload
 
 
 # ---------------------------------------------------------------------------

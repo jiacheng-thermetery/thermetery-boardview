@@ -30,7 +30,7 @@ _LOAD_ATTEMPTED = False
 
 def _candidate_names() -> list[str]:
     if sys.platform.startswith("win"):
-        return ["xzz_native.dll"]
+        return ["xzz_native.dll", "libxzz_native.dll"]
     if sys.platform == "darwin":
         return ["xzz_native.dylib", "libxzz_native.dylib"]
     return ["xzz_native.so", "libxzz_native.so"]

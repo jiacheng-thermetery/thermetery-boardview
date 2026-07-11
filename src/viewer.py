@@ -37,6 +37,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .parsers.boardview import BoardModel, Component, parse as parse_board, is_stub_format, FZKeyError
+from .runtime_paths import config_path, key_path
 
 
 def _check_native_dlls() -> None:
@@ -200,21 +201,21 @@ except ImportError:
 
 # ----- Persisted config (last-used dir + recent file list) ----------------
 
-_CONFIG_PATH = Path.home() / ".boardviewer.json"
 _RECENT_LIMIT = 10
 
 
 def _load_config() -> Dict[str, Any]:
     try:
-        return json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+        return json.loads(config_path().read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
 
 
 def _save_config(config: Dict[str, Any]) -> None:
     try:
-        _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _CONFIG_PATH.write_text(
+        path = config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
             json.dumps(config, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
@@ -5174,12 +5175,12 @@ class ViewerApp(tk.Tk):
         if fmt == "fz":
             title = "ASUS FZ key required"
             ask = (f"{path.name} is an RC6-encrypted ASUS .fz file and no key "
-                   f"was found (private/fz_key.txt or the FZ_KEY env var)."
+                   f"was found ({key_path('fz')} or the FZ_KEY env var)."
                    + nl + nl + "Paste the FZKey (44 x 32-bit hex words):")
         else:
             title = "XZZ key required"
             ask = (f"{path.name} is DES-encrypted and no valid key was found "
-                   f"(private/XZZ_Key.txt or the XZZPCB_KEY env var)."
+                   f"({key_path('xzz')} or the XZZPCB_KEY env var)."
                    + nl + nl + "Paste the XZZ key (16 hex digits):")
         prompt = (str(initial_error) + nl + nl + ask
                   if initial_error is not None else ask)
@@ -5214,23 +5215,23 @@ class ViewerApp(tk.Tk):
         return None
 
     def _maybe_save_key(self, fmt: str, entered: str) -> None:
-        """Offer to persist a working key to private/ so the user is not asked
+        """Offer to persist a working key locally so the user is not asked
         again. Opt-in; declining keeps the key for this session only."""
         nl = chr(10)
-        fname = "fz_key.txt" if fmt == "fz" else "XZZ_Key.txt"
+        destination = key_path(fmt)
         if not messagebox.askyesno(
                 "Remember this key?",
-                f"The key worked. Save it to private/{fname} so you are not "
+                f"The key worked. Save it to {destination} so you are not "
                 f"asked again?" + nl + nl
-                + "(private/ is gitignored - it will not be committed.)",
+                + "Official releases never contain keys. This is a plaintext local "
+                + "file; remove data/private before sharing a portable app folder.",
                 parent=self):
             return
         try:
-            priv = Path("private")
-            priv.mkdir(exist_ok=True)
-            (priv / fname).write_text(entered + nl, encoding="utf-8")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(entered + nl, encoding="utf-8")
             messagebox.showinfo("Key saved",
-                                f"Saved to {(priv / fname).resolve()}",
+                                f"Saved to {destination.resolve()}",
                                 parent=self)
         except OSError as exc:
             messagebox.showwarning(
@@ -5489,7 +5490,7 @@ def main() -> None:
                     help="Initialize and exit (no mainloop)")
     ap.add_argument("--key", default=None,
                     help="Decryption key for an encrypted board when the "
-                         "private/ key file is missing: ASUS .fz wants 44 hex "
+                         "local key file is missing: ASUS .fz wants 44 hex "
                          "words, XZZ .pcb wants 16 hex digits. Also settable "
                          "via the FZ_KEY / XZZPCB_KEY environment variables.")
     args = ap.parse_args()

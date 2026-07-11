@@ -70,6 +70,7 @@ import zlib
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from ..runtime_paths import key_path, managed_data_dir
 from .gencad_parser import BoardModel, Component, Shape
 
 
@@ -109,7 +110,7 @@ def _load_native_rc6():
 
     here = Path(__file__).resolve().parent
     if sys.platform.startswith("win"):
-        names = ["rc6_native.dll"]
+        names = ["rc6_native.dll", "librc6_native.dll"]
     elif sys.platform == "darwin":
         names = ["rc6_native.dylib", "librc6_native.dylib"]
     else:
@@ -209,7 +210,7 @@ def _decode_fz(buf: bytearray, *, source_name: str,
             raise FZKeyError(
                 f"{source_name}: ASUS-style FZ file (RC6-encrypted body). "
                 f"This needs an FZKey (44 x 32-bit hex words). Supply one via "
-                f"private/fz_key.txt, the FZ_KEY environment variable, or the "
+                f"{key_path('fz')}, the FZ_KEY environment variable, or the "
                 f"key= argument (the viewer prompts for it on open).",
                 reason="missing",
             )
@@ -382,14 +383,18 @@ def _load_fz_key() -> Optional[List[int]]:
       ``a1b2c3d4, deadbeef, ...``     (commas / mixed punctuation)
     Line-level `#` introduces a comment to end-of-line.
     """
-    candidates = [
-        Path("private") / "fz_key.txt",
-        Path(__file__).parent / "private" / "fz_key.txt",
-    ]
+    managed = managed_data_dir()
+    candidates = [key_path("fz")]
+    if managed is None:
+        candidates.append(Path(__file__).parent / "private" / "fz_key.txt")
     for p in candidates:
         if not p.exists():
             continue
-        words = _parse_fz_key_text(p.read_text(encoding="utf-8", errors="replace"))
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        words = _parse_fz_key_text(text)
         if words is not None:
             return words
     return None

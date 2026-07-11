@@ -720,18 +720,23 @@ def _detect_variant(data: bytes) -> str:
     return "gigabyte"
 
 
-def _parse_compal(path: Path) -> BoardModel:
+def _parse_compal(
+    path: Path, data: Optional[bytes] = None,
+) -> BoardModel:
     """Dispatch to the Compal/Lenovo decoder in ``tvw_compal``.
 
     Local import keeps the Compal module out of the import path for
     Gigabyte-only callers, and means a broken tvw_compal.py can't crash
     the Gigabyte path during module load.
+
+    ``data`` is the buffer already read for variant detection. Keeping it
+    optional preserves callers which historically passed only a path.
     """
     from ..tvw_compal import parse as parse_compal
-    return parse_compal(path)
+    return parse_compal(path, data=data)
 
 
-def parse(path: Path) -> BoardModel:
+def parse(path: Path, data: Optional[bytes] = None) -> BoardModel:
     """Public entry point. Detects the file's TVW variant and dispatches
     to the appropriate decoder.
 
@@ -739,18 +744,26 @@ def parse(path: Path) -> BoardModel:
     historical decoder, unchanged. Compal/Lenovo files (Thinkpad
     NM-B501, etc.) currently return a stub with a warning until the
     Compal decoder lands.
+
+    Callers which already hold the bytes may supply ``data``; otherwise the
+    file is read once here and the same buffer is passed to the decoder.
     """
-    data = Path(path).read_bytes()
+    if data is None:
+        data = Path(path).read_bytes()
     if _detect_variant(data) == "compal_lenovo":
-        return _parse_compal(path)
-    return _parse_gigabyte(path)
+        return _parse_compal(path, data=data)
+    return _parse_gigabyte(path, data=data)
 
 
-def _parse_gigabyte(path: Path) -> BoardModel:
+def _parse_gigabyte(
+    path: Path, data: Optional[bytes] = None,
+) -> BoardModel:
     """Gigabyte-variant TVW decoder. Historical body of ``parse()`` —
-    no behavioural changes vs the pre-dispatch implementation.
+    no behavioural changes vs the pre-dispatch implementation. ``data`` is
+    optional for compatibility with direct callers.
     """
-    data = Path(path).read_bytes()
+    if data is None:
+        data = Path(path).read_bytes()
     model = BoardModel()
 
     chips = _chip_headers(data)

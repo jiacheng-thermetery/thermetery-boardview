@@ -60,6 +60,26 @@ pip install -r requirements.txt
 | `requirements.txt` | numpy, skia-python, pyopengltk, PyOpenGL, tkinterdnd2 | renderer tiers + drag-drop |
 | `requirements-walker.txt` | PyYAML, openpyxl, pymupdf, anthropic, openai, keyring | **experimental** walker only — skip unless you want to try it |
 
+### Windows installer and portable build
+
+Windows releases are self-contained: end users do not need Python, Meson,
+Ninja, or GCC. Build both the per-user installer and portable ZIP from a fresh
+Windows checkout with:
+
+```powershell
+.\packaging\build_windows.cmd -Clean
+```
+
+The script bootstraps pinned packaging dependencies, compiles the three native
+parser DLLs with LTO, runs source and frozen-app diagnostics, and writes the
+artifacts plus `SHA256SUMS.txt` under `release/`. See
+`packaging/README.md` for release switches and CI details.
+
+The installed app stores settings and remembered keys under
+`%LOCALAPPDATA%\Thermetery Boardviewer`. The portable ZIP has a marker that
+keeps them under its adjacent `data` directory; remove `data\private` before
+sharing a used portable folder because remembered keys are plaintext files.
+
 ## Running
 
 ```

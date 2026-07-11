@@ -82,15 +82,19 @@ def is_stub_format(path: PathLike) -> bool:
 def _sniff_and_parse(path: Path, key=None) -> BoardModel:
     """Look at the first few KB to decide. Useful when the extension is
     unfamiliar but the contents are recognisable."""
+    # Read one bounded binary prefix for both binary and text sniffing. The
+    # previous `read_bytes()[:0x40]` + `read_text()[:8000]` sequence loaded
+    # the entire file twice before the selected parser loaded it a third time.
+    # Let open/read errors propagate, matching the old read_text() behaviour.
+    with path.open("rb") as f:
+        prefix = f.read(8000)
+
     # Binary formats first — XZZPCB has a stable magic at offset 0
     # (sometimes XOR-obfuscated, handled by verify_format).
-    try:
-        head_bytes = path.read_bytes()[:0x40]
-    except OSError:
-        head_bytes = b""
+    head_bytes = prefix[:0x40]
     if head_bytes and _verify_xzzpcb(head_bytes):
         return _parse_xzzpcb(path, key=key)
-    head = path.read_text(encoding="utf-8", errors="replace")[:8000]
+    head = prefix.decode("utf-8", errors="replace")
     if "$COMPONENTS" in head and "$SIGNALS" in head:
         return _parse_gencad(path)
     if "BRDOUT:" in head or ("var_data:" in head and "Format:" in head):

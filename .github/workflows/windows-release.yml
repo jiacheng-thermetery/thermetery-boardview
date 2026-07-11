@@ -1,0 +1,107 @@
+name: Build Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (for example, 0.1.0)
+        required: true
+        default: 1.0.0
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows-x64:
+    name: Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    defaults:
+      run:
+        shell: pwsh
+
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.14 x64
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          architecture: x64
+
+      - name: Set up MSVC x64 compiler
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Resolve release version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if ($env:EVENT_NAME -eq "workflow_dispatch") {
+            $version = $env:INPUT_VERSION.Trim()
+          } else {
+            $version = $env:REF_NAME -replace '^v', ''
+          }
+
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
+            throw "Release version '$version' is not a supported semantic version."
+          }
+
+          "value=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build release artifacts
+        run: |
+          $env:BOARDVIEWER_BUILD_PYTHON = (Get-Command python.exe).Source
+          & .\packaging\build_windows.ps1 `
+            -Version "${{ steps.version.outputs.value }}" `
+            -OutputDir (Join-Path $env:GITHUB_WORKSPACE "release") `
+            -Clean
+
+      - name: Verify release artifacts
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          $expected = @(
+            "ThermeteryBoardviewer-$env:RELEASE_VERSION-windows-x64-setup.exe",
+            "ThermeteryBoardviewer-$env:RELEASE_VERSION-windows-x64-portable.zip",
+            "SHA256SUMS.txt"
+          )
+
+          foreach ($name in $expected) {
+            $path = Join-Path $env:GITHUB_WORKSPACE "release\$name"
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Expected release artifact was not produced: $path"
+            }
+          }
+
+          Get-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "release\SHA256SUMS.txt")
+
+      - name: Upload Windows release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ThermeteryBoardviewer-${{ steps.version.outputs.value }}-windows-x64
+          path: |
+            release/*.exe
+            release/*.zip
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

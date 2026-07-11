@@ -113,7 +113,9 @@ def _load() -> Optional[ctypes.CDLL]:
         return _LIB if _LIB is not False else None
     here = Path(__file__).resolve().parent
     if sys.platform.startswith("win"):
-        names = ["tvw_native.dll"]
+        # MinGW commonly emits a Unix-style `lib` prefix for DLLs. Accept
+        # both it and the prefix-free release filename.
+        names = ["tvw_native.dll", "libtvw_native.dll"]
     elif sys.platform == "darwin":
         names = ["tvw_native.dylib", "libtvw_native.dylib"]
     else:
@@ -810,25 +812,6 @@ def build_topology(
                 flat.append(vx)
                 flat.append(vy)
         poly_verts[:len(flat)] = flat
-
-    # Output buffers. Conservative cap: every pad + 2*seg + every vert
-    # could be a unique node. Real boards have lots of dedup so the
-    # actual node count is far smaller — we trim afterwards.
-    node_cap = max(n_pads + 2 * n_segs + total_verts, 1)
-    node_x = np.zeros(node_cap, dtype=np.int32)
-    node_y = np.zeros(node_cap, dtype=np.int32)
-    node_layer = np.zeros(node_cap, dtype=np.uint8)
-    node_net = np.zeros(node_cap, dtype=np.int32)
-    uf_parent = np.zeros(node_cap, dtype=np.int32)
-    uf_rank = np.zeros(node_cap, dtype=np.int32)
-    uf_size = np.zeros(node_cap, dtype=np.int32)
-    pad_node = np.zeros(max(n_pads, 1), dtype=np.int32)
-    seg_node_a = np.zeros(max(n_segs, 1), dtype=np.int32)
-    seg_node_b = np.zeros(max(n_segs, 1), dtype=np.int32)
-    poly_nodes_data = np.zeros(max(total_verts, 1), dtype=np.int32)
-    poly_nodes_off = np.zeros(max(n_polys + 1, 1), dtype=np.uint32)
-    seg_net_out = np.zeros(max(n_segs, 1), dtype=np.int32)
-    poly_net_out = np.zeros(max(n_polys, 1), dtype=np.int32)
 
     return _call_build_topology(
         pad_arr, n_pads, seg_arr, n_segs,

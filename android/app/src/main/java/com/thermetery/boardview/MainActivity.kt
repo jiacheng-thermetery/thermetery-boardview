@@ -144,7 +144,10 @@ class MainActivity : ComponentActivity() {
                 val result = PythonRuntime.boardExport().callAttr("load_traces").toString()
                 val json = JSONObject(result)
                 if (json.optBoolean("ok")) {
-                    runJs("window.bv && bv.onTraces(${JSONObject.quote(result)});")
+                    // The exporter returns validated JSON. Inject it as an object
+                    // literal so large trace payloads aren't escaped into a second
+                    // string and parsed yet again by viewer.js.
+                    runJs("window.bv && bv.onTraces($result);")
                 } else {
                     val reason = json.optString("reason")
                         .ifEmpty { json.optString("error", "unknown error") }
@@ -182,13 +185,17 @@ class MainActivity : ComponentActivity() {
                 postStatus("")
                 return@submit
             }
+            val rememberedFormat = rememberedKeyFormat(displayName)
+            val rememberedKey = rememberedFormat?.let { KeyVault.load(this, it) }
             parseBoard(
                 ParseAttempt(
                     file = dest,
                     displayName = displayName,
-                    key = null,
+                    key = rememberedKey,
                     promptsUsed = 0,
-                    triedRemembered = false,
+                    // Known encrypted extensions were checked before parsing,
+                    // even when no saved key was present.
+                    triedRemembered = rememberedFormat != null,
                     rememberFormat = null,
                 )
             )
@@ -218,6 +225,14 @@ class MainActivity : ComponentActivity() {
 
     private fun sanitizeFileName(name: String): String =
         name.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+
+    /** Key slot implied by a filename, before an expensive keyless parse. */
+    private fun rememberedKeyFormat(displayName: String): String? =
+        when (displayName.substringAfterLast('.', "").lowercase()) {
+            "fz" -> "fz"
+            "pcb" -> "xzzpcb"
+            else -> null
+        }
 
     // ------------------------------------------------------------- parsing
 
@@ -266,7 +281,7 @@ class MainActivity : ComponentActivity() {
             val key = attempt.key
             if (fmt != null && key != null) KeyVault.save(this, fmt, key)
             boardOpen = true
-            runJs("window.bv && bv.onBoard(${JSONObject.quote(result)});")
+            runJs("window.bv && bv.onBoard($result);")
             postStatus("")
             return
         }

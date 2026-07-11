@@ -1928,10 +1928,18 @@ class TraceGraph:
 
     def net_id_by_name(self, name: str) -> Optional[int]:
         """Reverse lookup. None if not found."""
-        for i, n in enumerate(self.net_names):
-            if n == name:
-                return i
-        return None
+        # Selection/render paths call this repeatedly for the same immutable
+        # table. Build the reverse map once while preserving the historical
+        # first-match result for duplicate names. ``getattr`` keeps v10
+        # on-disk caches created before this derived field was introduced
+        # loadable without a cache-version bump.
+        index = getattr(self, "_net_id_by_name_cache", None)
+        if index is None:
+            index = {}
+            for i, net_name in enumerate(self.net_names):
+                index.setdefault(net_name, i)
+            self._net_id_by_name_cache = index
+        return index.get(name)
 
     def net_at(
         self, x: int, y: int, layer: str = "TOP", tol: int = 100,

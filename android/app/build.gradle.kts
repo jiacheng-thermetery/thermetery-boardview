@@ -30,6 +30,7 @@ val pythonRootModules = listOf(
 val pythonPackageModules = listOf(
     "src/__init__.py",
     "src/ratsnest.py",
+    "src/runtime_paths.py",
     // tvw_compal & tvw_topology landed at src/ (not src/parsers/) in the restructure.
     "src/tvw_compal.py",
     "src/tvw_topology.py",

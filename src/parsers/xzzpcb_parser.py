@@ -97,6 +97,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from ..runtime_paths import key_path, managed_data_dir
 from .gencad_parser import BoardModel, Component, Shape
 
 
@@ -430,7 +431,7 @@ class XZZPCBParser:
             self.warnings.append(
                 "XZZPCB key not provided; encrypted part/pin records "
                 "will be skipped. Drop a 16-hex-digit key into "
-                "private/XZZ_Key.txt, set XZZPCB_KEY in the environment, "
+                f"{key_path('xzz')}, set XZZPCB_KEY in the environment, "
                 "or pass key= to parse()."
             )
 
@@ -918,8 +919,14 @@ def _resolve_key(explicit: Optional[int]) -> Optional[int]:
     # parser's directory (handles the case where xzzpcb_parser.py
     # lives inside boardviewer/ but the project root's private/ holds
     # the key).
-    here = Path(__file__).resolve().parent
-    bases = [Path("private"), here / "private", here.parent / "private"]
+    managed = managed_data_dir()
+    if managed is not None:
+        # Frozen builds intentionally do not search CWD, home, or a bundler's
+        # extraction tree. The viewer writes this same canonical location.
+        bases = [key_path("xzz").parent]
+    else:
+        here = Path(__file__).resolve().parent
+        bases = [Path("private"), here / "private", here.parent / "private"]
     seen: set = set()
     for base in bases:
         for name in ("XZZ_Key.txt", "xzz_key.txt", "XZZ_KEY.txt"):
@@ -939,6 +946,8 @@ def _resolve_key(explicit: Optional[int]) -> Optional[int]:
                 continue
             if parsed is not None:
                 return parsed
+    if managed is not None:
+        return None
     try:
         legacy = Path.home() / ".boardviewer" / "xzz_key"
     except RuntimeError:
