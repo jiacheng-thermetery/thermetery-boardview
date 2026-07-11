@@ -1232,7 +1232,7 @@
   }
 
   function setHighlight(net, refreshPanel) {
-    if (net === hlNet) return false;
+    if (net === hlNet) return;
     hlNet = net;
     updateChip();
     if (refreshPanel !== false) {
@@ -1241,7 +1241,6 @@
     }
     needRaster = true;
     scheduleRender();
-    return true;
   }
 
   function updateChip() {

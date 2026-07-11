@@ -129,31 +129,6 @@ def _detect_format(path: Path, model: Optional[BoardModel]) -> str:
     return fmt
 
 
-def _units_per_mm(model: BoardModel) -> Optional[float]:
-    # Replicates viewer.py:512-534 (units_per_mm heuristic). The viewer
-    # defaults to 39.37 when there are no components; the contract wants
-    # null when the scale is not actually known, so an empty model
-    # reports null instead.
-    components = iter(model.components.values())
-    first = next(components, None)
-    if first is None:
-        return None
-    min_x = max_x = _num(first.x)
-    min_y = max_y = _num(first.y)
-    for comp in components:
-        x, y = _num(comp.x), _num(comp.y)
-        if x < min_x:
-            min_x = x
-        elif x > max_x:
-            max_x = x
-        if y < min_y:
-            min_y = y
-        elif y > max_y:
-            max_y = y
-    span = max(max_x - min_x, max_y - min_y)
-    return 3937.0 if span > 50_000 else 39.37
-
-
 def _component_outline(
     comp,
     shape,
@@ -384,7 +359,10 @@ def _open_board(path: str, key: Optional[str]) -> str:
     # Serialize before publishing the model.  If a very large payload cannot
     # be encoded, the UI still shows the previous board and load_traces()
     # must therefore keep referring to that same previous board.
-    payload = json.dumps(out, separators=_COMPACT)
+    # allow_nan=False: a non-finite coordinate must fail loudly here (the
+    # open_board wrapper turns it into the ok:false shape) instead of
+    # emitting bare NaN, which only today's lenient consumers tolerate.
+    payload = json.dumps(out, separators=_COMPACT, allow_nan=False)
     _STATE.update({
         "model": model,
         "path": p,
@@ -522,7 +500,7 @@ def _load_traces() -> str:
         },
         "vias": {"x": via_x, "y": via_y, "net": via_net},
     }
-    return json.dumps(out, separators=_COMPACT)
+    return json.dumps(out, separators=_COMPACT, allow_nan=False)
 
 
 # ---------------------------------------------------------------------------

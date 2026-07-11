@@ -19,19 +19,45 @@ class _CountingShape:
 
 class BoardExportTests(unittest.TestCase):
     def test_units_per_mm_streams_component_bounds(self):
-        self.assertIsNone(board_export._units_per_mm(BoardModel()))
+        # Asserted through the payload so the test pins the live inline
+        # heuristic in _open_board, not a parallel copy.
+        def exported_units(model):
+            with mock.patch.object(board_export, "parse_board", return_value=model):
+                payload = json.loads(board_export._open_board("fixture.cad", None))
+            return payload["meta"]["units_per_mm"]
 
-        small = BoardModel(components={
-            "A": Component("A", 10.0, 20.0),
-            "B": Component("B", 20.0, 40.0),
-        })
-        self.assertEqual(board_export._units_per_mm(small), 39.37)
+        saved_state = board_export._STATE.copy()
+        try:
+            self.assertIsNone(exported_units(BoardModel()))
 
-        large = BoardModel(components={
-            "A": Component("A", -30_000.0, 0.0),
-            "B": Component("B", 30_001.0, 0.0),
-        })
-        self.assertEqual(board_export._units_per_mm(large), 3937.0)
+            small = BoardModel(components={
+                "A": Component("A", 10.0, 20.0),
+                "B": Component("B", 20.0, 40.0),
+            })
+            self.assertEqual(exported_units(small), 39.37)
+
+            large = BoardModel(components={
+                "A": Component("A", -30_000.0, 0.0),
+                "B": Component("B", 30_001.0, 0.0),
+            })
+            self.assertEqual(exported_units(large), 3937.0)
+        finally:
+            board_export._STATE.clear()
+            board_export._STATE.update(saved_state)
+
+    def test_non_finite_coordinates_fail_loudly(self):
+        # allow_nan=False: a NaN coordinate must surface as the ok:false
+        # shape, never as a bare NaN token in the payload.
+        saved_state = board_export._STATE.copy()
+        model = BoardModel(components={"A": Component("A", float("nan"), 0.0)})
+        try:
+            with mock.patch.object(board_export, "parse_board", return_value=model):
+                result = json.loads(board_export.open_board("fixture.cad"))
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"], "parse_error")
+        finally:
+            board_export._STATE.clear()
+            board_export._STATE.update(saved_state)
 
     def test_open_board_reuses_shape_bounds_and_preserves_geometry(self):
         shape = _CountingShape()
