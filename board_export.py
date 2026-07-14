@@ -545,46 +545,10 @@ def validate_key(fmt: str, key_text: str) -> str:
       ``malformed`` otherwise — the shell tells the user it's confirmed only
       by opening a board.
     """
-    f = (fmt or "").strip().lower()
-    if f in ("pcb", "xzz"):
-        f = "xzzpcb"
-    try:
-        if f == "fz":
-            from src.parsers import fz_parser
-            words = fz_parser._parse_fz_key_text(key_text or "")
-            if words is None:
-                return json.dumps(
-                    {"ok": False, "status": "malformed",
-                     "message": "Need exactly 44 hex words (32-bit each)."},
-                    separators=_COMPACT)
-            if fz_parser._validate_fz_key(words):
-                return json.dumps(
-                    {"ok": True, "status": "valid",
-                     "message": "Valid ASUS key — parity check passed."},
-                    separators=_COMPACT)
-            return json.dumps(
-                {"ok": False, "status": "invalid",
-                 "message": "44 words parsed but the parity check failed "
-                            "— this is not a correct ASUS key."},
-                separators=_COMPACT)
-        if f == "xzzpcb":
-            from src.parsers import xzzpcb_parser
-            val = xzzpcb_parser._parse_key_text(key_text or "")
-            if val is None:
-                return json.dumps(
-                    {"ok": False, "status": "malformed",
-                     "message": "Need a hex key value (e.g. 16 hex digits)."},
-                    separators=_COMPACT)
-            return json.dumps(
-                {"ok": True, "status": "unverified",
-                 "message": "Key is well-formed. XZZ keys can only be fully "
-                            "verified by opening an encrypted board."},
-                separators=_COMPACT)
-        return json.dumps(
-            {"ok": False, "status": "unknown_format",
-             "message": "Unknown key format: " + f},
-            separators=_COMPACT)
-    except Exception as exc:  # never raise across the bridge
-        return json.dumps(
-            {"ok": False, "status": "error", "message": str(exc)},
-            separators=_COMPACT)
+    # Validation itself is shared with the desktop key manager so the two
+    # platforms can never drift; see src/key_store.py.
+    from src.key_store import validate_key_text, is_savable
+    status, message = validate_key_text(fmt, key_text)
+    return json.dumps(
+        {"ok": is_savable(status), "status": status, "message": message},
+        separators=_COMPACT)

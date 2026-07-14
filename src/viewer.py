@@ -36,6 +36,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+from . import key_store
 from .parsers.boardview import BoardModel, Component, parse as parse_board, is_stub_format, FZKeyError
 from .runtime_paths import config_path, key_path
 
@@ -4983,6 +4984,11 @@ class ViewerApp(tk.Tk):
                               command=lambda: self.canvas.rotate(-1))
         menubar.add_cascade(label="View", menu=view_menu)
 
+        settings_menu = tk.Menu(menubar, tearoff=False)
+        settings_menu.add_command(label="Decryption keys…",
+                                  command=self._open_key_manager)
+        menubar.add_cascade(label="Settings", menu=settings_menu)
+
         help_menu = tk.Menu(menubar, tearoff=False)
         help_menu.add_command(label="About", command=self._show_about)
         menubar.add_cascade(label="Help", menu=help_menu)
@@ -5474,6 +5480,191 @@ class ViewerApp(tk.Tk):
             "  • Teboview   (.tvw)\n"
             "  • XZZPCB V1.0   (.pcb, MSI / repair shops)\n",
         )
+
+    def _open_key_manager(self) -> None:
+        # Reuse a single instance so repeated menu clicks just refocus it.
+        existing = getattr(self, "_key_manager", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_set()
+            return
+        self._key_manager = KeyManagerDialog(self)
+
+
+# Decryption-key slots shown in the key manager: (format, title, hint).
+_KEY_MANAGER_SLOTS = (
+    ("fz", "ASUS  ·  .fz  (RC6)",
+     "Paste the FZKey — 44 × 32-bit hex words. Fully verified here."),
+    ("xzz", "XZZ  ·  .pcb  (DES)",
+     "Paste the XZZ key (hex). Confirmed only by opening a board."),
+)
+
+_STATUS_COLORS = {
+    "good": "#1a7f37",
+    "warn": "#9a6700",
+    "bad": "#b42318",
+    "neutral": "#555555",
+}
+
+
+class KeyManagerDialog(tk.Toplevel):
+    """Standalone decryption-key manager (Settings → Decryption keys…).
+
+    Desktop counterpart of the Android key screen: provision the ASUS ``.fz``
+    (RC6) and XZZ ``.pcb`` (DES) keys up front — paste or load from a file,
+    validate offline, save, or clear — without needing to open a board first.
+    Keys persist to the same plaintext files the open flow reads (each slot
+    shows its exact on-disk path), and validation is shared with the Android
+    bridge via :mod:`key_store`.
+    """
+
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(master)
+        self.title("Decryption keys")
+        self.transient(master)
+        self.resizable(False, False)
+        self._texts: Dict[str, tk.Text] = {}
+        self._statuses: Dict[str, ttk.Label] = {}
+        self._build()
+        self._refresh_all()
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.update_idletasks()
+        self.grab_set()
+
+    # ----- construction ----------------------------------------------------
+
+    def _build(self) -> None:
+        outer = ttk.Frame(self, padding=12)
+        outer.pack(fill="both", expand=True)
+
+        ttk.Label(
+            outer, wraplength=540, justify="left",
+            text=("Decryption keys are stored only on this computer and "
+                  "supplied automatically when you open an encrypted board."),
+        ).pack(anchor="w")
+        ttk.Label(
+            outer, wraplength=540, justify="left", foreground="#777777",
+            text=("Official releases never contain keys. Each key is a "
+                  "plaintext file; remove the private folder before sharing a "
+                  "portable app folder."),
+        ).pack(anchor="w", pady=(2, 10))
+
+        for fmt, title, hint in _KEY_MANAGER_SLOTS:
+            self._build_slot(outer, fmt, title, hint)
+
+        buttons = ttk.Frame(outer)
+        buttons.pack(fill="x", pady=(2, 0))
+        ttk.Button(buttons, text="Close", command=self.destroy).pack(side="right")
+
+    def _build_slot(self, parent: tk.Misc, fmt: str, title: str,
+                    hint: str) -> None:
+        frame = ttk.LabelFrame(parent, text=title, padding=10)
+        frame.pack(fill="x", pady=(0, 10))
+
+        ttk.Label(frame, text=hint, wraplength=520,
+                  justify="left").pack(anchor="w")
+        ttk.Label(frame, text=f"Stored at:  {key_path(fmt)}", wraplength=520,
+                  justify="left", foreground="#777777").pack(anchor="w",
+                                                             pady=(1, 6))
+
+        text = tk.Text(frame, height=3, width=68, wrap="word",
+                       font="TkFixedFont")
+        text.pack(fill="x")
+        self._texts[fmt] = text
+
+        status = ttk.Label(frame, text="", wraplength=520, justify="left")
+        status.pack(anchor="w", pady=(6, 6))
+        self._statuses[fmt] = status
+
+        row = ttk.Frame(frame)
+        row.pack(fill="x")
+        ttk.Button(row, text="Load file…",
+                   command=lambda: self._load_file(fmt)).pack(side="left")
+        ttk.Button(row, text="Validate",
+                   command=lambda: self._validate(fmt)).pack(side="left",
+                                                             padx=(6, 0))
+        ttk.Button(row, text="Save",
+                   command=lambda: self._save(fmt)).pack(side="left",
+                                                         padx=(6, 0))
+        ttk.Button(row, text="Clear",
+                   command=lambda: self._clear(fmt)).pack(side="left",
+                                                          padx=(6, 0))
+
+    # ----- helpers ---------------------------------------------------------
+
+    def _get(self, fmt: str) -> str:
+        return self._texts[fmt].get("1.0", "end").strip()
+
+    def _set(self, fmt: str, value: str) -> None:
+        widget = self._texts[fmt]
+        widget.delete("1.0", "end")
+        if value:
+            widget.insert("1.0", value)
+
+    def _set_status(self, fmt: str, message: str, kind: str) -> None:
+        self._statuses[fmt].configure(text=message,
+                                      foreground=_STATUS_COLORS[kind])
+
+    def _refresh_all(self) -> None:
+        for fmt, _title, _hint in _KEY_MANAGER_SLOTS:
+            saved = key_store.read_key(fmt)
+            if saved:
+                self._set(fmt, saved)
+                self._set_status(fmt, "Saved on this computer.", "good")
+            else:
+                self._set_status(fmt, "Not set.", "neutral")
+
+    # ----- actions ---------------------------------------------------------
+
+    def _load_file(self, fmt: str) -> None:
+        path = filedialog.askopenfilename(
+            parent=self, title="Choose a key file",
+            filetypes=[("Text / key files", "*.txt *.key"),
+                       ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            messagebox.showwarning("Could not read file", str(exc), parent=self)
+            return
+        self._set(fmt, text.strip())
+        self._validate(fmt)
+
+    def _validate(self, fmt: str) -> str:
+        text = self._get(fmt)
+        if not text:
+            self._set_status(fmt, "Not set.", "neutral")
+            return "empty"
+        status, message = key_store.validate_key_text(fmt, text)
+        kind = {"valid": "good", "unverified": "warn"}.get(status, "bad")
+        self._set_status(fmt, message, kind)
+        return status
+
+    def _save(self, fmt: str) -> None:
+        text = self._get(fmt)
+        if not text:
+            messagebox.showinfo("Nothing to save",
+                                "Paste or load a key first.", parent=self)
+            return
+        status = self._validate(fmt)
+        if not key_store.is_savable(status):
+            messagebox.showwarning(
+                "Not saved",
+                "The key is not well-formed, so it was not saved.",
+                parent=self)
+            return
+        try:
+            dest = key_store.write_key(fmt, text)
+        except OSError as exc:
+            messagebox.showwarning("Could not save key", str(exc), parent=self)
+            return
+        self._set_status(fmt, f"Saved to {dest}.", "good")
+
+    def _clear(self, fmt: str) -> None:
+        had = key_store.clear_key(fmt)
+        self._set(fmt, "")
+        self._set_status(fmt, "Cleared." if had else "Not set.", "neutral")
 
 
 def main() -> None:
