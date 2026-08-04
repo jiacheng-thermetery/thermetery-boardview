@@ -30,7 +30,7 @@ X570, B550, and BoardViewer.exe ground-truth on individual chips):
     name (0x02 = TOP, anything else = BOTTOM).
   - Pin grid synthesis: BGA names parsed into (column, row) for proper
     grid layout; numeric names distributed around the perimeter.
-  - Footprint sizing calibrated to file units (1 unit ≈ 0.000325 mm,
+  - Footprint sizing calibrated to file units (1 unit = 1 centi-mil,
     derived from board span ≈ ATX 305mm vs 938k chip-position units).
   - Net name table (3015 packed Pascal strings on Z490) at file offset
     ~+5987078 — kept as a list for reference.
@@ -1094,12 +1094,16 @@ def _add_perimeter_pins(shape, names: List[str], w: float, h: float) -> None:
         shape.pins.append((name, x, y))
 
 
-# TVW coordinate-unit calibration. Empirically derived:
-#   Z490 chip-position X span (1st-99th percentile, excluding mounting-hole
-#   outliers) ≈ 887,050 units. The Z490 VISION G is an ATX board, ~305 mm
-#   long → 1 unit ≈ 0.000325 mm. All sizes in `_footprint_size_raw` are
-#   in mm × 1000; we scale by `_UNITS_PER_MM` to convert to file units.
-_UNITS_PER_MM = 3.077  # 1 mm ≈ 3077 TVW units
+# TVW coordinate unit: one centi-mil (1/100,000 inch, 0.254 um), i.e.
+# 3,937 file units per mm. Verified three independent ways on the Z490:
+# component span 915,387 x 1,158,840 units = 232 x 294 mm against the
+# 305 x 244 mm ATX spec; PCIe x16 pin pitch 3,940 units for 1.00 mm;
+# DDR4 slot pitch 3,346 units for 0.85 mm. (An earlier calibration got
+# 3.077 by dividing the SHORT-axis component span by the LONG 305 mm
+# ATX dimension, under-sizing every fallback footprint by 22%.)
+# `_footprint_size_mm` values are physical sizes in mm x 1000; this
+# constant converts them to file units.
+_UNITS_PER_MM = 3.937  # mm x 1000 -> centi-mil file units
 
 
 def _footprint_size(fp: str) -> Tuple[float, float]:
@@ -1204,29 +1208,29 @@ def _footprint_size_mm(fp: str) -> Tuple[float, float]:
 
     # Resistors / capacitors / diodes by package code
     if "0201" in f:
-        return (700, 350)
+        return (600, 300)
     if "0402" in f:
-        return (1200, 700)
+        return (1000, 500)
     if "0603" in f:
-        return (1800, 1000)
+        return (1600, 800)
     if "0805" in f:
-        return (2400, 1400)
+        return (2000, 1250)
     if "1206" in f:
-        return (3500, 1800)
+        return (3200, 1600)
     if "1210" in f:
-        return (3500, 2700)
+        return (3200, 2500)
 
     # Inductors / chokes
     m = re.search(r'CHOKE(\d+)X(\d+)', f)
     if m:
-        return (int(m.group(1)) * 1100, int(m.group(2)) * 1100)
+        return (int(m.group(1)) * 1000, int(m.group(2)) * 1000)
     if "CHOKE" in f or "FERRI" in f or "INDUCT" in f:
         return (8000, 6000)
 
     # Electrolytic / tantalum caps with mm dimensions in name
     m = re.search(r'EC(\d+)D(\d+)MM', f) or re.search(r'EC(\d+)X(\d+)', f)
     if m:
-        return (int(m.group(1)) * 1100, int(m.group(2)) * 1100)
+        return (int(m.group(1)) * 1000, int(m.group(2)) * 1000)
     if "TANT" in f:
         return (4000, 3000)
 

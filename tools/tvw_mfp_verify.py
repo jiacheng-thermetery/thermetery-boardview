@@ -26,7 +26,7 @@ from src.parsers.tvw_master_fp import (
 )
 
 
-# Tolerance buckets (in file units; ~1 unit ≈ 0.000325 mm ≈ 0.325 µm,
+# Tolerance buckets (in file units; 1 unit = 1 centi-mil = 0.254 µm,
 # so 50 ≈ 16 µm; 200 ≈ 65 µm; 1000 ≈ 325 µm).
 TOL_LEVELS = (50, 200, 1000)
 GRID_UNITS = 5000  # spatial-grid cell size; ~1.6 mm

@@ -27,9 +27,10 @@ or **(partial)** describe patterns observed but not exhaustively confirmed.
   the earlier 0.32 µm / 3,125-per-mm figures quoted here would imply an
   impossible 293 × 371 mm board.
 - Typical motherboard span: ±1,200,000 file units (≈ 300 mm).
-- Master-footprint *size* records use their own scale, handled by the
-  empirically-fitted `_UNITS_PER_MM` in `tvw_parser.py` — do not
-  conflate it with the coordinate unit above.
+- Master-footprint pin coordinates use the same file unit. (The
+  *fallback body-size table* in `tvw_parser.py` is hand-authored in
+  mm × 1000 and converted with `_UNITS_PER_MM = 3.937` — there are no
+  size records in the file itself.)
 - All coords stored as `(Y, X)` on disk, NOT `(X, Y)`. Every reader
   must swap. Verified across pads, segments, and polylines.
 - Origin (0, 0) is anchored on a mounting hole (`MH1` on Gigabyte
@@ -145,7 +146,7 @@ The file's `rotation` enum is left-handed:
 ### Verification
 
 91.8% of 32,713 pins across Z490/B550/X570 match an actual pad
-within 50 file units (~16 µm) using the unified transform.
+within 50 file units (~12.7 µm) using the unified transform.
 
 ### Code
 
