@@ -81,9 +81,14 @@ C:/Android/sdk/platform-tools/adb.exe logcat -s Boardview BoardviewPy BoardviewJ
 ## Behaviour notes
 
 - Opening a board: in-app picker (SAF `ACTION_OPEN_DOCUMENT`) or "open with"
-  from a file manager (`ACTION_VIEW` for `.tvw .fz .pcb .cad .brd .brd2 .bv`).
-  The stream is copied to `cacheDir/boards/<displayName>` and kept for the
-  session — the lazy trace build re-reads it.
+  from a file manager (`ACTION_VIEW` for `.tvw .fz .pcb .cad .brd .brd2 .bv
+  .asc`). The stream is copied to `cacheDir/boards/<displayName>` and kept
+  for the session — the lazy trace build re-reads it.
+- Folder-shaped boards (eM-Test Expert `.asc` sets): the "Folder" toolbar
+  button opens the SAF tree picker; the shell copies the folder's `*.asc`
+  members into `cacheDir/boards/<folderName>/` and parses the directory.
+  Opening a single `.asc` file shows a hint that routes to the folder
+  picker (a single-document grant cannot read the sibling members).
 - Encrypted boards (`.fz`, XZZ `.pcb`): a native dialog prompts for the key,
   up to 3 attempts, mirroring `viewer.py:_load_with_key_prompt`. Checking
   "Remember on this device" stores the working key at

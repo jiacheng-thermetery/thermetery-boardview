@@ -55,6 +55,12 @@
                 <data android:pathPattern=".*\\.bv" />
                 <data android:pathPattern=".*\\..*\\.bv" />
                 <data android:pathPattern=".*\\..*\\..*\\.bv" />
+                <!-- Single .asc members can't parse alone (the board is
+                     the whole folder); MainActivity shows a hint that
+                     routes to the folder picker. -->
+                <data android:pathPattern=".*\\.asc" />
+                <data android:pathPattern=".*\\..*\\.asc" />
+                <data android:pathPattern=".*\\..*\\..*\\.asc" />
             </intent-filter>
         </activity>
 
