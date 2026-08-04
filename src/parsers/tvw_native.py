@@ -22,10 +22,10 @@ callers fall through to the Python implementation transparently.
 from __future__ import annotations
 
 import ctypes
-import os
-import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+from ..runtime_paths import native_lib_candidates
 
 
 # --------------------------------------------------------------------------
@@ -112,30 +112,7 @@ def _load() -> Optional[ctypes.CDLL]:
     if _LIB is not None:
         return _LIB if _LIB is not False else None
     here = Path(__file__).resolve().parent
-    if sys.platform.startswith("win"):
-        # MinGW commonly emits a Unix-style `lib` prefix for DLLs. Accept
-        # both it and the prefix-free release filename.
-        names = ["tvw_native.dll", "libtvw_native.dll"]
-    elif sys.platform == "darwin":
-        names = ["tvw_native.dylib", "libtvw_native.dylib"]
-    else:
-        names = ["tvw_native.so", "libtvw_native.so"]
-    candidates: list[str] = []
-    env_dir = os.environ.get("BOARDVIEW_NATIVE_DIR")
-    if env_dir:
-        candidates += [str(Path(env_dir) / n) for n in names]
-    # Restructured (src-layout) location: libs live in the native/ subdir.
-    candidates += [str(here / 'native' / n) for n in names
-                   if (here / 'native' / n).exists()]
-    # Legacy flat layout: lib sitting next to this module.
-    candidates += [str(here / n) for n in names if (here / n).exists()]
-    if not sys.platform.startswith("win"):
-        # Android/APK and system installs: the lib may not exist as a plain
-        # file next to this module (it lives in the app's nativeLibraryDir,
-        # or this module is packaged inside a zip). A bare soname lets
-        # dlopen search the dynamic linker's own paths.
-        candidates += [n for n in names if n.startswith("lib")]
-    for cand in candidates:
+    for cand in native_lib_candidates(here, "tvw_native"):
         try:
             lib = ctypes.CDLL(cand)
         except OSError:

@@ -64,12 +64,16 @@ import hashlib
 import math
 import os
 import struct
-import sys
 import zlib
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from ..runtime_paths import key_path, managed_data_dir
+from ..runtime_paths import (
+    key_filename,
+    key_path,
+    native_lib_candidates,
+    private_dir_candidates,
+)
 from .gencad_parser import BoardModel, Component, Shape
 
 
@@ -108,28 +112,7 @@ def _load_native_rc6():
         return _NATIVE_RC6 if _NATIVE_RC6 is not False else None
 
     here = Path(__file__).resolve().parent
-    if sys.platform.startswith("win"):
-        names = ["rc6_native.dll", "librc6_native.dll"]
-    elif sys.platform == "darwin":
-        names = ["rc6_native.dylib", "librc6_native.dylib"]
-    else:
-        names = ["rc6_native.so", "librc6_native.so"]
-    candidates: list[str] = []
-    env_dir = os.environ.get("BOARDVIEW_NATIVE_DIR")
-    if env_dir:
-        candidates += [str(Path(env_dir) / n) for n in names]
-    # Restructured (src-layout) location: libs live in the native/ subdir.
-    candidates += [str(here / 'native' / n) for n in names
-                   if (here / 'native' / n).exists()]
-    # Legacy flat layout: lib sitting next to this module.
-    candidates += [str(here / n) for n in names if (here / n).exists()]
-    if not sys.platform.startswith("win"):
-        # Android/APK and system installs: the lib may not exist as a plain
-        # file next to this module (it lives in the app's nativeLibraryDir,
-        # or this module is packaged inside a zip). A bare soname lets
-        # dlopen search the dynamic linker's own paths.
-        candidates += [n for n in names if n.startswith("lib")]
-    for cand in candidates:
+    for cand in native_lib_candidates(here, "rc6_native"):
         try:
             lib = ctypes.CDLL(cand)
             fn = lib.rc6_decode
@@ -381,12 +364,14 @@ def _load_fz_key() -> Optional[List[int]]:
       ``a1b2c3d4\\ndeadbeef\\n...``    (one token per line, no prefix)
       ``a1b2c3d4, deadbeef, ...``     (commas / mixed punctuation)
     Line-level `#` introduces a comment to end-of-line.
+
+    Search order is shared with xzzpcb_parser via
+    :func:`runtime_paths.private_dir_candidates`, so both formats honour the
+    same locations (and the same frozen-build restriction to the managed one).
     """
-    managed = managed_data_dir()
-    candidates = [key_path("fz")]
-    if managed is None:
-        candidates.append(Path(__file__).parent / "private" / "fz_key.txt")
-    for p in candidates:
+    name = key_filename("fz")
+    for base in private_dir_candidates(Path(__file__).resolve().parent):
+        p = base / name
         if not p.exists():
             continue
         try:

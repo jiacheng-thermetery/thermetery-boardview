@@ -97,7 +97,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from ..runtime_paths import key_path, managed_data_dir
+from ..runtime_paths import (
+    key_filename,
+    key_path,
+    managed_data_dir,
+    private_dir_candidates,
+)
 from .gencad_parser import BoardModel, Component, Shape
 
 
@@ -916,23 +921,15 @@ def _resolve_key(explicit: Optional[int]) -> Optional[int]:
         parsed = _parse_key_text(env)
         if parsed is not None:
             return parsed
-    # Same convention as private/fz_key.txt — check the CWD's private/
-    # first (works when launched from the project root), then the
-    # parser's own directory (its own private/), then the parent of the
-    # parser's directory (handles the case where xzzpcb_parser.py
-    # lives inside boardviewer/ but the project root's private/ holds
-    # the key).
+    # Directory order (and the frozen-build restriction to the managed
+    # location) is shared with fz_parser via private_dir_candidates.
     managed = managed_data_dir()
-    if managed is not None:
-        # Frozen builds intentionally do not search CWD, home, or a bundler's
-        # extraction tree. The viewer writes this same canonical location.
-        bases = [key_path("xzz").parent]
-    else:
-        here = Path(__file__).resolve().parent
-        bases = [Path("private"), here / "private", here.parent / "private"]
+    bases = private_dir_candidates(Path(__file__).resolve().parent)
     seen: set = set()
     for base in bases:
-        for name in ("XZZ_Key.txt", "xzz_key.txt", "XZZ_KEY.txt"):
+        # Case variants beyond the canonical name: the historical keyfile
+        # convention predates a fixed spelling, and case matters on Linux.
+        for name in (key_filename("xzz"), "xzz_key.txt", "XZZ_KEY.txt"):
             cand = base / name
             try:
                 resolved = cand.resolve()
