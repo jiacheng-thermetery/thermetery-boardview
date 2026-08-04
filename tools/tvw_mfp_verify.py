@@ -14,13 +14,13 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .parsers.tvw_parser import (  # type: ignore
+from src.parsers.tvw_parser import (  # type: ignore
     _decode_position,
     _extract_pads,
     _find_chip_headers,
     _find_pad_runs,
 )
-from .parsers.tvw_master_fp import (
+from src.parsers.tvw_master_fp import (
     parse_master_footprints,
     pins_world_positions,
 )
@@ -139,9 +139,9 @@ def verify_board(path: Path) -> Dict[str, object]:
 
 def main() -> None:
     boards = [
-        Path("C:/Claude Code/Z490 VISION G r1.0.tvw"),
-        Path("C:/Claude Code/Gigabyte_X570_GAMING_X_REV1.01.tvw"),
-        Path("C:/Claude Code/B550_AORUS_PRO_AC_REV1.0.tvw"),
+        Path("C:/thermetery-boardview/boardviews/Z490 VISION G r1.0.tvw"),
+        Path("C:/thermetery-boardview/boardviews/Gigabyte_X570_GAMING_X_REV1.01.tvw"),
+        Path("C:/thermetery-boardview/boardviews/B550_AORUS_PRO_AC_REV1.0.tvw"),
     ]
 
     grand_pins = 0
@@ -160,7 +160,7 @@ def main() -> None:
         print(f"  Chips with master fp: {res['overall']['chips']}")
         print(f"  Total pins evaluated: {res['overall']['pins']}")
         n = max(res['overall']['pins'], 1)
-        print(f"  Match rates:")
+        print("  Match rates:")
         for t in TOL_LEVELS:
             cnt = res['overall'][f"@{t}"]
             print(f"    @{t:>4} units: {cnt:>5}/{n:<5}  "
@@ -169,7 +169,7 @@ def main() -> None:
         grand_pins += res['overall']['pins']
 
         # Per-footprint breakdown
-        print(f"\n  Per-footprint (only fps with chip instances):")
+        print("\n  Per-footprint (only fps with chip instances):")
         per_fp = res['per_fp']
         rows = sorted(per_fp.items(), key=lambda kv: -kv[1]['pins'])
         print(f"    {'footprint':<32} {'inst':>4} {'pins':>5} "
@@ -183,7 +183,7 @@ def main() -> None:
         # Imperfect chips
         imperfect = [d for d in res['details'] if d['@50'] < d['pins']]
         if imperfect:
-            print(f"\n  Chips with imperfect match (sorted by missed pins):")
+            print("\n  Chips with imperfect match (sorted by missed pins):")
             imperfect.sort(key=lambda d: -(d['pins'] - d['@50']))
             for d in imperfect[:20]:
                 print(f"    {d['footprint']:<28} rot={d['rot']:>3}  "

@@ -38,7 +38,6 @@ excluded_modules = [
     "src.linker",
     "src.signal_match",
     "src.schematic_text",
-    "src.convert_rules",
     "anthropic",
     "openai",
     "keyring",

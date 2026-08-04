@@ -22,16 +22,16 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import List, Tuple
 
-from .parsers import boardview
-from .parsers.gencad_parser import BoardModel, BrokenNet
+from src.parsers import boardview
+from src.parsers.gencad_parser import BoardModel, BrokenNet
 
 
 BOARDS: List[str] = [
-    "C:/Claude Code/Z490 VISION G r1.0.tvw",
-    "C:/Claude Code/Gigabyte_X570_GAMING_X_REV1.01.tvw",
-    "C:/Claude Code/B550_AORUS_PRO_AC_REV1.0.tvw",
+    "C:/thermetery-boardview/boardviews/Z490 VISION G r1.0.tvw",
+    "C:/thermetery-boardview/boardviews/Gigabyte_X570_GAMING_X_REV1.01.tvw",
+    "C:/thermetery-boardview/boardviews/B550_AORUS_PRO_AC_REV1.0.tvw",
 ]
 
 
@@ -56,7 +56,7 @@ def _pick_signal_nets_with_geometry(model: BoardModel,
     (b) have non-empty topology geometry. The first match for each is
     used as a smoke test for `trace_geometry_for_net`.
     """
-    from .parsers.tvw_parser import _POWER_NET_RE
+    from src.parsers.tvw_parser import _POWER_NET_RE
     graph = model.topology
     # One-pass collection of nets that actually carry geometry. Calling
     # `geometry_on_net` per candidate is O(segs+polys) each — too slow
@@ -81,7 +81,7 @@ def _pick_pad_centres(model: BoardModel,
                       n: int = 2) -> List[Tuple[float, float, str, str]]:
     """Pick up to n pads on signal (non-power) nets, return as
     (x, y, layer, expected_net_name)."""
-    from .parsers.tvw_parser import _POWER_NET_RE
+    from src.parsers.tvw_parser import _POWER_NET_RE
     graph = model.topology
     seen_nets: set = set()
     out: List[Tuple[float, float, str, str]] = []
@@ -239,7 +239,7 @@ def _exercise_non_tvw_smoke() -> bool:
     """GENCAD models now carry topology too (built lazily from $ROUTES).
     Verify the loader fires correctly and the same helpers return data."""
     _hr("GENCAD topology smoke test")
-    cad = "C:/Claude Code/MSI MS-7680 Rev 5.1 BoardView.cad"
+    cad = "C:/thermetery-boardview/boardviews/MSI MS-7680 Rev 5.1 BoardView.cad"
     if not Path(cad).exists():
         _ok("GENCAD board file present", False,
             f"missing {cad!r}; skipping")
@@ -253,7 +253,7 @@ def _exercise_non_tvw_smoke() -> bool:
 
     g = model.topology
     overall &= (len(g.segments) > 0)
-    _ok(f"GENCAD topology has segments", len(g.segments) > 0,
+    _ok("GENCAD topology has segments", len(g.segments) > 0,
         f"{len(g.segments):,} segments, {len(g.pads):,} pads, "
         f"{len(g.net_names):,} nets")
 

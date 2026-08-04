@@ -20,20 +20,18 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Iterable, List, Set, Tuple
+from typing import List, Set, Tuple
 
 import yaml
 
-from .schematic_text import extract_index, SchematicIndex
-from .signal_match import (
+from src.schematic_text import extract_index, SchematicIndex
+from src.signal_match import (
     MatchCandidate,
     build_match_index,
     find_signal_candidates,
-    normalize,
     tokenize_rule_entry,
 )
 
