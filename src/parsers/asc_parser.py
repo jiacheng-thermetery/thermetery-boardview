@@ -53,7 +53,11 @@ from .gencad_parser import BoardModel, Component, Shape
 # Case-insensitive sibling filenames that make up one board.
 _MEMBERS = ("format", "parts", "pins", "nails", "nets")
 
-_NO_CONNECT = {"", "(NC)", "(R)", "NC", "UNCONNECTED"}
+# Only the markers this format actually emits: "(NC)"/"(R)" pin-column
+# placeholders and the per-pin synthetic NC__<n> nets. Deliberately does
+# NOT include bare "NC" — that is a plausible real net name (a relay's
+# normally-closed contact), unlike the parenthesised markers.
+_NO_CONNECT = {"", "(NC)", "(R)"}
 _NC_PREFIX = "NC__"
 
 _MILS_PER_INCH = 1000.0
@@ -154,23 +158,55 @@ def parse(path: Path) -> BoardModel:
 # File location & units
 # --------------------------------------------------------------------------
 
+def _member_and_prefix(stem: str) -> Optional[Tuple[str, str]]:
+    """Split an .asc stem into (member, board_prefix).
+
+    "parts" -> ("parts", ""); "60-mjb000_parts" -> ("parts", "60-mjb000");
+    anything else -> None."""
+    for member in _MEMBERS:
+        if stem == member:
+            return (member, "")
+        if stem.endswith("_" + member):
+            return (member, stem[: -len(member) - 1])
+    return None
+
+
 def _locate_members(path: Path) -> Dict[str, Path]:
-    """Map member name -> path for the .asc set containing `path`."""
+    """Map member name -> path for the .asc set containing `path`.
+
+    Files are grouped by their board prefix ("" for the canonical bare
+    names, "<board>" for "<board>_parts.asc"-style flattened exports) and
+    only ONE group is used — never a splice across groups. Opening a
+    member file selects that file's own group; opening the directory
+    selects the bare-name group if present, else the largest group
+    (ties broken alphabetically for determinism)."""
     directory = path if path.is_dir() else path.parent
-    members: Dict[str, Path] = {}
+    groups: Dict[str, Dict[str, Path]] = {}
     try:
-        entries = list(directory.iterdir())
+        entries = sorted(directory.iterdir())
     except OSError:
-        return members
+        return {}
     for entry in entries:
         if entry.suffix.lower() != ".asc":
             continue
-        stem = entry.stem.lower()
-        for member in _MEMBERS:
-            # Exact name ("parts.asc") or suffixed ("<board>_parts.asc").
-            if stem == member or stem.endswith("_" + member):
-                members.setdefault(member, entry)
-    return members
+        parsed = _member_and_prefix(entry.stem.lower())
+        if parsed is None:
+            continue
+        member, prefix = parsed
+        groups.setdefault(prefix, {}).setdefault(member, entry)
+    if not groups:
+        return {}
+
+    if not path.is_dir():
+        parsed = _member_and_prefix(path.stem.lower())
+        if parsed is not None:
+            # The opened file names its own board — use exactly that set.
+            return groups.get(parsed[1], {})
+
+    if "" in groups:
+        return groups[""]
+    best = max(groups.items(), key=lambda kv: (len(kv[1]), kv[0]))
+    return best[1]
 
 
 def _read(path: Path) -> str:
@@ -185,10 +221,11 @@ def _detect_scale(members: Dict[str, Path], warnings: List[str]) -> float:
         if p is None:
             continue
         head = _read(p)[:2000].upper()
-        if "INCH UNITS" in head:
-            return _MILS_PER_INCH
-        if "MM UNITS" in head:
-            return _MILS_PER_MM
+        # Whitespace-tolerant: the format's headers are column-padded,
+        # so "MM  units" style spacing must still match.
+        m = re.search(r"\b(INCH|MM)\s+UNITS\b", head)
+        if m:
+            return _MILS_PER_INCH if m.group(1) == "INCH" else _MILS_PER_MM
     warnings.append("no 'INCH units'/'MM units' header found; assuming inches")
     return _MILS_PER_INCH
 
@@ -246,7 +283,14 @@ def _add_via_nails(model: BoardModel, text: str, scale: float) -> None:
         if not m:
             continue
         nail, xs, ys, side, net, target = m.groups()
-        if "VIA" not in target.upper():
+        # Target column reads "V VIA .", "V PIN AC21.1", or "PIN AAFP.1"
+        # (leading "V" = virtual). Token-match the kind — a substring
+        # test would misfire on a PIN target whose refdes contains
+        # "VIA" (e.g. "V PIN VIA1.3").
+        toks = target.upper().split()
+        if toks and toks[0] == "V":
+            toks = toks[1:]
+        if not toks or toks[0] != "VIA":
             continue
         shape = Shape(name=f"_asc_nail_{nail}")
         shape.pins.append(("1", 0.0, 0.0))

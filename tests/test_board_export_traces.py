@@ -13,7 +13,13 @@ import unittest
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-import numpy as np
+# numpy is an optional dependency of the codebase; the numpy-fast-path
+# assertions below need it, but its absence must skip this module rather
+# than break collection of the whole suite.
+try:
+    import numpy as np
+except ImportError:  # pragma: no cover
+    raise unittest.SkipTest("numpy not installed")
 
 import board_export
 from src.parsers.gencad_parser import BoardModel

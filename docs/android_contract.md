@@ -177,20 +177,30 @@ how the renderer is developed and tested without Android.
   device" → `filesDir/keys/<fmt>.txt`; pass remembered key automatically on
   next `open_board` failure of that format. `android:allowBackup="false"`.
 - Chaquopy: Python 3.13, `pip { install "numpy==1.26.2" }`, abiFilters
-  arm64-v8a + x86_64. Python sources staged by a Gradle copy task from the
-  repo root — exact module list:
-  `board_export.py, boardview.py, gencad_parser.py, brd_parser.py,
-   tvw_parser.py, tvw_master_fp.py, tvw_compal.py, tvw_topology.py,
-   tvw_seg_27_unified_v3.py, fz_parser.py, xzzpcb_parser.py, ratsnest.py,
-   tvw_native.py, xzz_native.py`
-  (NEVER glob the repo root — it contains a gitignored sample board and
-  Windows DLLs.)
+  arm64-v8a + x86_64. Python sources staged by a Gradle copy task
+  (`:app:stagePythonSources`) from the repo root, **preserving the
+  `src/` package paths** (the parser core uses relative imports and
+  cannot be flattened). The authoritative module list lives in
+  `android/app/build.gradle.kts` (`pythonRootModules` +
+  `pythonPackageModules`): `board_export.py` at the staged root plus
+  the `src/` package (`__init__.py, ratsnest.py, runtime_paths.py,
+  key_store.py, units.py, tvw_compal.py, tvw_topology.py`) and
+  `src/parsers/` (`__init__.py, boardview.py, gencad_parser.py,
+  brd_parser.py, asc_parser.py, tvw_parser.py, tvw_master_fp.py,
+  tvw_trace_scanners.py, fz_parser.py, xzzpcb_parser.py,
+  tvw_native.py, xzz_native.py`). The Gradle task fails the build if a
+  listed file is missing — when a module moves or a new import is
+  added to the core, update the list in the same change. (NEVER glob
+  the repo root — it contains gitignored sample boards and Windows
+  DLLs.)
 - minSdk 24, targetSdk 35, versionName from repo git describe if easy, else
   hardcode `0.1.0`.
 - Local toolchain on this machine: JDK `C:\Android\jdk-17.0.19+10`, Gradle
   `C:\Android\gradle-8.10.2\bin\gradle.bat`, SDK `C:\Android\sdk`
-  (build-tools 34/35, platform android-35), local buildPython =
-  `C:\ProgramData\anaconda3\python.exe` (3.11). No Gradle wrapper needed —
+  (build-tools 34/35, platform android-35). Chaquopy 17 requires
+  buildPython's minor version to match the target (3.13):
+  `C:/Users/Administrator/AppData/Local/Python/pythoncore-3.13-64/python.exe`
+  (the older anaconda 3.11 does not work). No Gradle wrapper needed —
   invoke the local Gradle directly with `-p android`.
 
 ## 7. What v1 explicitly does NOT include

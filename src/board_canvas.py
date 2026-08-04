@@ -862,6 +862,10 @@ class BoardCanvasCPU(CanvasCommon, tk.Canvas):
         # And the per-layer count cache — keyed off the old board's
         # components — so the status bar reflects the new one.
         self._comp_count_by_layer = {}
+        # And the memoized unit scale: swapping a mil-scaled board for a
+        # centi-mil TVW (or vice versa) must re-run the span heuristic,
+        # or the measure tool reports 100x-off distances.
+        self._units_per_mm_cache = None
         self._compute_bounds()
         self._reorder_components()
         self.zoom = 1.0
@@ -1883,6 +1887,8 @@ if _GL_AVAILABLE:
             self._geometry_net_cache = (None, ([], []))
             # And the per-layer component count cache, same reason.
             self._comp_count_by_layer = {}
+            # And the memoized unit scale (mil vs centi-mil), same reason.
+            self._units_per_mm_cache = None
             self._compute_bounds()
             self._reorder_components()
             self.zoom = 1.0
