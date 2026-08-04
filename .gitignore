@@ -28,6 +28,9 @@ nda/
 *.cst
 *.brdview
 *.pdf
+# eM-Test Expert ICT sets (format/parts/pins/nails/nets .asc + vendor BOMs)
+*.asc
+*.bom
 schematics/
 boardviews/
 

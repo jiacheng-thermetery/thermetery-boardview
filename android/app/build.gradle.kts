@@ -41,6 +41,7 @@ val pythonPackageModules = listOf(
     "src/parsers/boardview.py",
     "src/parsers/gencad_parser.py",
     "src/parsers/brd_parser.py",
+    "src/parsers/asc_parser.py",
     "src/parsers/tvw_parser.py",
     "src/parsers/tvw_master_fp.py",
     "src/parsers/tvw_seg_27_unified_v3.py",

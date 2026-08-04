@@ -21,6 +21,10 @@ Supported today:
                          private/XZZ_Key.txt or env XZZPCB_KEY.
                          Without a key the outline + test pads +
                          net list still parse.)
+  .asc                 — eM-Test Expert ICT set (mid-2000s ASUS)   full
+                         (a directory of parts/pins/nails/nets/
+                         format .asc files; open any one of them,
+                         or the directory itself)
 
 Importers should pull `BoardModel`, `Component`, `Shape` from here so we
 have one consistent surface.
@@ -36,6 +40,7 @@ from .tvw_parser import parse as _parse_tvw
 from .fz_parser import parse as _parse_fz, FZKeyError
 from .xzzpcb_parser import parse as _parse_xzzpcb
 from .xzzpcb_parser import verify_format as _verify_xzzpcb
+from .asc_parser import parse as _parse_asc
 
 PathLike = Union[str, Path]
 
@@ -45,7 +50,8 @@ BRD_EXTS = {".brd", ".brd2", ".bv"}
 TVW_EXTS = {".tvw"}
 FZ_EXTS = {".fz"}
 XZZPCB_EXTS = {".pcb"}
-ALL_EXTS = GENCAD_EXTS | BRD_EXTS | TVW_EXTS | FZ_EXTS | XZZPCB_EXTS
+ASC_EXTS = {".asc"}
+ALL_EXTS = GENCAD_EXTS | BRD_EXTS | TVW_EXTS | FZ_EXTS | XZZPCB_EXTS | ASC_EXTS
 
 
 def parse(path: PathLike, key=None) -> BoardModel:
@@ -56,7 +62,12 @@ def parse(path: PathLike, key=None) -> BoardModel:
     (ASUS) parser wants 44 hex words, the XZZPCB parser wants 16 hex digits.
     Both accept it as a string. Ignored for unencrypted formats."""
     p = Path(path)
+    if p.is_dir():
+        # Only the eM-Test Expert .asc set is directory-shaped.
+        return _parse_asc(p)
     ext = p.suffix.lower()
+    if ext in ASC_EXTS:
+        return _parse_asc(p)
     if ext in GENCAD_EXTS:
         return _parse_gencad(p)
     if ext in BRD_EXTS:

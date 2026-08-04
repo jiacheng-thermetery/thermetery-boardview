@@ -4851,7 +4851,7 @@ class ViewerApp(tk.Tk):
 
     # Boardview extensions accepted by `parse_board()`. Single source of
     # truth shared between the menu picker and the drop handler.
-    BOARD_EXTS = (".cad", ".brd", ".brd2", ".bv", ".tvw", ".fz", ".pcb")
+    BOARD_EXTS = (".cad", ".brd", ".brd2", ".bv", ".tvw", ".fz", ".pcb", ".asc")
 
     def _setup_drag_and_drop(self) -> None:
         """Activate tkinterdnd2 on the existing Tk root and register a
@@ -5124,12 +5124,13 @@ class ViewerApp(tk.Tk):
         path = filedialog.askopenfilename(
             title="Open boardview",
             filetypes=[
-                ("Boardview", "*.cad *.brd *.brd2 *.bv *.tvw *.fz *.pcb"),
+                ("Boardview", "*.cad *.brd *.brd2 *.bv *.tvw *.fz *.pcb *.asc"),
                 ("GENCAD", "*.cad"),
                 ("OpenBoardView ASCII", "*.brd *.brd2 *.bv"),
                 ("Teboview", "*.tvw"),
                 ("Allegro Extracta (ASRock / ASUS)", "*.fz"),
                 ("XZZPCB (MSI / repair shops)", "*.pcb"),
+                ("eM-Test Expert ICT set (pick any member)", "*.asc"),
                 ("All files", "*.*"),
             ],
             initialdir=_last_dir() or ".",
