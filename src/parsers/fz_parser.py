@@ -63,7 +63,6 @@ import ctypes
 import hashlib
 import math
 import os
-import pickle
 import struct
 import sys
 import zlib

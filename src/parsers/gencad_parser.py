@@ -213,11 +213,22 @@ class BoardModel:
             if v in self.signals:
                 return v
 
+        # Case-insensitive fallback via a lazily-built UPPER -> canonical
+        # index. linker.py probes many variants per rule signal, and the
+        # previous per-miss linear scan over every net name made cold
+        # rule-linking O(rules x nets). Rebuilt if the signal count
+        # changes (parsers populate `signals` before handing the model
+        # out, but stay safe against later additions).
         upper = base.upper()
-        for k in self.signals:
-            if k.upper() == upper:
-                return k
-        return None
+        cached = getattr(self, "_upper_signal_index", None)
+        if cached is None or cached[0] != len(self.signals):
+            idx: Dict[str, str] = {}
+            for k in self.signals:
+                # first-wins, matching the old linear scan's semantics
+                idx.setdefault(k.upper(), k)
+            cached = (len(self.signals), idx)
+            self._upper_signal_index = cached
+        return cached[1].get(upper)
 
     # ------------------------------------------------------------------
     # Trace topology accessors. These short-circuit gracefully when no

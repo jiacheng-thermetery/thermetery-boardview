@@ -5,7 +5,7 @@
 component pin list, and the net node list. Used by both the viewer and
 the walker; extracted from their previously duplicated copies."""
 
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import tkinter as tk
 from tkinter import ttk
@@ -235,7 +235,7 @@ class ComponentInfoPanel(ttk.Frame):
         on_pin_select: Optional[Callable[[str], None]] = None,
     ):
         super().__init__(parent, padding=6)
-        self.board = board
+        self._index_board(board)
         self.on_pin_select = on_pin_select
         self.current_refdes: Optional[str] = None
 
@@ -277,8 +277,19 @@ class ComponentInfoPanel(ttk.Frame):
 
         self.show_placeholder()
 
-    def set_board(self, board: BoardModel) -> None:
+    def _index_board(self, board: BoardModel) -> None:
+        """Adopt a board and build the refdes -> [(pin, net), ...] index.
+        Built once per board: the previous per-click scan of every net's
+        every node was O(total pins on the board) for each component
+        click — noticeable on 10k+-pin boards."""
         self.board = board
+        self._pins_by_refdes: Dict[str, List[Tuple[str, str]]] = {}
+        for net, nodes in board.signals.items():
+            for r, p in nodes:
+                self._pins_by_refdes.setdefault(r, []).append((p, net))
+
+    def set_board(self, board: BoardModel) -> None:
+        self._index_board(board)
         self.show_placeholder()
 
     def show_placeholder(self) -> None:
@@ -296,11 +307,7 @@ class ComponentInfoPanel(ttk.Frame):
         self.current_refdes = refdes
         shape = self.board.shapes.get(comp.shape)
 
-        pins_on_comp: List[Tuple[str, str]] = []
-        for net, nodes in self.board.signals.items():
-            for r, p in nodes:
-                if r == refdes:
-                    pins_on_comp.append((p, net))
+        pins_on_comp = list(self._pins_by_refdes.get(refdes, ()))
 
         # If we have no signals data (e.g. TVW partial-parse), fall back
         # to listing pins straight from the shape so the user can still

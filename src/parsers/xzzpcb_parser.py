@@ -424,7 +424,10 @@ class XZZPCBParser:
         self.key = key if (key is not None and check_key(key)) else None
         if key is not None and self.key is None:
             self.warnings.append(
-                f"XZZPCB key 0x{key:016x} failed parity check; "
+                # Deliberately does NOT echo the attempted key: this
+                # warning surfaces in the UI and logs, and key material
+                # must never leak into either.
+                "XZZPCB key failed parity check; "
                 "encrypted part/pin records will be skipped"
             )
         elif self.key is None:

@@ -53,9 +53,10 @@ Coordinate / transform provenance — replicated from viewer.py:
   key was in play (a supplied key that fails the parity check also
   lands here -> "invalid").
 
-* units_per_mm heuristic: viewer.py:512-534 (``units_per_mm``) —
-  component-extent span > 50,000 file units => centi-mil (3937.0 u/mm),
-  else mil (39.37 u/mm); null when there are no components to measure.
+* units_per_mm heuristic: src/units.py (``units_per_mm_for_span``,
+  shared with the desktop canvases) — component-extent span > 50,000
+  file units => centi-mil (3937.0 u/mm), else mil (39.37 u/mm); null
+  when there are no components to measure.
 """
 
 from __future__ import annotations
@@ -66,6 +67,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.parsers.boardview import BoardModel, FZKeyError, parse as parse_board
+from src.units import units_per_mm_for_span
 
 _COMPACT = (",", ":")
 
@@ -337,7 +339,7 @@ def _open_board(path: str, key: Optional[str]) -> str:
 
     if components:
         component_span = max(comp_maxx - comp_minx, comp_maxy - comp_miny)
-        units_per_mm = 3937.0 if component_span > 50_000 else 39.37
+        units_per_mm = units_per_mm_for_span(component_span)
     else:
         units_per_mm = None
 

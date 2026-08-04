@@ -61,6 +61,20 @@ def _remember_dir(path: Path) -> None:
     _save_config(config)
 
 
+def _remember_board_opened(board: Path) -> None:
+    """Update last_dir and the recent list with one config read+write
+    (opening a board previously loaded and rewrote the file twice)."""
+    config = _load_config()
+    config["last_dir"] = str(board.parent if board.is_file() else board)
+    recent = [r for r in config.get("recent", []) if isinstance(r, str)]
+    s = str(board)
+    if s in recent:
+        recent.remove(s)
+    recent.insert(0, s)
+    config["recent"] = recent[:_RECENT_LIMIT]
+    _save_config(config)
+
+
 def _get_recent() -> List[str]:
     raw = _load_config().get("recent", [])
     return [r for r in raw if isinstance(r, str)]
@@ -119,6 +133,7 @@ class ViewerApp(tk.Tk):
         if board_path:
             _add_recent(board_path)
         self._rebuild_recent_menu()
+        self._count_board_layers()
         self._update_status()
 
         # Drag-drop wiring goes last so all targets exist. Failure to
@@ -435,10 +450,10 @@ class ViewerApp(tk.Tk):
             better = self._load_with_key_prompt(path, fmt="xzz")
             if better is not None:
                 board = better
-        _remember_dir(path)
-        _add_recent(path)
+        _remember_board_opened(path)
         self.board = board
         self.board_path = path
+        self._count_board_layers()
         self.title(self._title_for(path))
         self._build_pin_to_net()
         self.canvas.set_board(board)
@@ -704,10 +719,17 @@ class ViewerApp(tk.Tk):
 
     # ----- status / about ---------------------------------------------------
 
+    def _count_board_layers(self) -> None:
+        """Cache the TOP-side component count for the status bar.
+        _update_status fires on nearly every interaction and previously
+        re-scanned all components each time."""
+        self._n_top_components = sum(
+            1 for c in self.board.components.values() if c.layer == "TOP")
+
     def _update_status(self) -> None:
         n_comp = len(self.board.components)
         n_net = len(self.board.signals)
-        n_top = sum(1 for c in self.board.components.values() if c.layer == "TOP")
+        n_top = self._n_top_components
         n_bot = n_comp - n_top
         layer = self.canvas.view_layer
         # Synthetic-ratsnest cue: when traces are on AND the active

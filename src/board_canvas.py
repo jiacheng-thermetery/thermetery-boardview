@@ -134,6 +134,21 @@ def available_layers_for(board: BoardModel) -> List[str]:
             seen.add(name)
     return out
 
+def _segments_by_layer(topo) -> Dict[str, list]:
+    """Per-layer partition of `topo.segments`, built lazily and cached on
+    the topology object (mirroring the GL tier's `_gl_seg_arrays` pattern).
+    The CPU tier's dimmed-traces phase previously re-scanned the full
+    segment list on every frame — at drag/zoom rates on a 40k-segment
+    board most of that work filtered out other layers' segments."""
+    cache = getattr(topo, "_segs_by_layer", None)
+    if cache is None:
+        cache = {}
+        for seg in topo.segments:
+            cache.setdefault(seg.layer, []).append(seg)
+        topo._segs_by_layer = cache
+    return cache
+
+
 # ----- Shared canvas behavior ---------------------------------------------
 
 
@@ -1322,9 +1337,7 @@ class BoardCanvasCPU(CanvasCommon, tk.Canvas):
                 paint_dashed.setStyle(_skia.Paint.Style.kStroke_Style)
                 paint_dashed.setPathEffect(
                     _skia.DashPathEffect.Make([4.0, 4.0], 0.0))
-            for seg in topo.segments:
-                if seg.layer != layer:
-                    continue
+            for seg in _segments_by_layer(topo).get(layer, ()):
                 if sel_net_id is not None and seg.net_id == sel_net_id:
                     continue
                 sx_min = seg.x1 if seg.x1 < seg.x2 else seg.x2
@@ -1488,9 +1501,7 @@ class BoardCanvasCPU(CanvasCommon, tk.Canvas):
                 sel_net_id = None
         if self.zoom >= self.TRACE_DIMMED_ZOOM_THRESHOLD:
             dimmed_color = layer_color(layer, dim=True)
-            for seg in topo.segments:
-                if seg.layer != layer:
-                    continue
+            for seg in _segments_by_layer(topo).get(layer, ()):
                 if sel_net_id is not None and seg.net_id == sel_net_id:
                     continue
                 sx_min = seg.x1 if seg.x1 < seg.x2 else seg.x2
