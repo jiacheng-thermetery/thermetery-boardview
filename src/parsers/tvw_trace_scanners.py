@@ -1,19 +1,34 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) 2026 Thermetery Technology LLC
 
-"""Phase 27: Unified scanner v3 with polyline chains support.
+"""TVW trace-region record scanners.
 
-A polyline chain is a sequence of polylines [u32 K][K * (X, Y)] separated by
-either 4 zero bytes OR 12 zero bytes (4 + extra 8 padding).
-Found primarily in X570.
+The five byte-level scanners that carve a TVW layer region into its
+record families, plus the interval helpers that chain them:
 
-Probably what's happening: X570 stores polylines NOT in [count][type=1] blocks,
-but as bare chains. Z490 and B550 mostly use blocks, so chains add little there.
+    find_polyline_blocks          [count][type=1] polyline blocks
+    find_tagged_polylines_in_gap  [net_id][K][K * (X, Y)] polylines
+    find_pad_runs_in_gap          38-byte pad records
+    find_segments_in_gap          24-byte trace segments
+    find_polyline_chains_in_gap   bare polyline chains
+    merge_intervals / find_gaps   coverage bookkeeping
+
+Each scanner prefers the C implementation in `tvw_native` and falls back
+to the pure-Python reference loop here; the Python bodies stay
+authoritative for the record grammar.
+
+`tvw_topology` runs them in the order listed (each pass only searches the
+gaps left by its predecessors), and `analyze()` below reports that same
+sweep for one region as a coverage breakdown.
+
+A polyline chain is a sequence of polylines [u32 K][K * (X, Y)] separated
+by either 4 zero bytes OR 12 zero bytes (4 + extra 8 padding). X570
+stores most of its polylines this way rather than in [count][type=1]
+blocks; Z490 and B550 mostly use blocks, so chains add little there.
 """
 from __future__ import annotations
 import struct
 from pathlib import Path
-from collections import Counter
 
 
 def find_polyline_blocks(buf, region_start, region_end, max_K=100000):
@@ -346,9 +361,9 @@ def analyze(file_path, region_start, region_end, label):
 if __name__ == "__main__":
     import sys as _sys
 
-    # Usage: python tvw_seg_27_unified_v3.py FILE.tvw REGION_START REGION_END [LABEL]
+    # Usage: python tvw_trace_scanners.py FILE.tvw REGION_START REGION_END [LABEL]
     if len(_sys.argv) < 4:
-        print(__doc__ or "usage: tvw_seg_27_unified_v3.py FILE.tvw START END [LABEL]")
+        print(__doc__ or "usage: tvw_trace_scanners.py FILE.tvw START END [LABEL]")
         _sys.exit(2)
     _label = _sys.argv[4] if len(_sys.argv) > 4 else Path(_sys.argv[1]).name
     analyze(_sys.argv[1], int(_sys.argv[2]), int(_sys.argv[3]), _label)

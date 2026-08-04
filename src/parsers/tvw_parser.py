@@ -65,12 +65,11 @@ import math
 import os
 import re
 import struct
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .gencad_parser import BoardModel, Component, Shape
-from .tvw_master_fp import parse_master_footprints, pins_world_positions
+from .tvw_master_fp import parse_master_footprints, pins_chip_local_positions
 
 # --------------------------------------------------------------------------
 # Optional C-DLL fast path for the two hottest cold-load scanners:
@@ -277,7 +276,8 @@ def _decode_position(buf: bytes, marker_off: int) -> Tuple[int, int, int]:
         i32s = struct.unpack('<8i', pre)
     except struct.error:
         return (0, 0, 0)
-    _y_alt, chip_y, chip_x, rot = i32s[0], i32s[1], i32s[2], i32s[3]
+    # i32s[0] is an alternate chip Y (close to i32s[1]); unused.
+    chip_y, chip_x, rot = i32s[1], i32s[2], i32s[3]
     # Snap rotation to nearest 90°
     if rot not in (0, 90, 180, 270):
         rot = (rot // 90 * 90) if 0 <= rot < 360 else 0
@@ -828,8 +828,8 @@ def _parse_gigabyte(
 
         # Populate shape.pins from the master footprint table when this
         # footprint is in there (~99 % of chips). Each master-fp pin has
-        # a known position in footprint-local coords; we transform to
-        # world via `pins_world_positions`, then convert back to the
+        # a known position in footprint-local coords;
+        # `pins_chip_local_positions` maps those straight into the
         # chip-local frame the renderer expects (so the renderer's
         # standard rotation reproduces the world position). Pin names
         # come from the file's per-chip pin records by index, with
@@ -839,20 +839,13 @@ def _parse_gigabyte(
         # synthesizer just like before.
         master_pins = master_fps.get(chip['footprint'])
         if master_pins:
-            theta_inv = math.radians(-rot)
-            cti, sti = math.cos(theta_inv), math.sin(theta_inv)
-            world_pins = pins_world_positions(
-                chip['footprint'], (x, y), rot, master_fps,
+            local_pins = pins_chip_local_positions(
+                chip['footprint'], rot, master_fps,
             )
             existing_names = {p['name'] for p in best_pins}
             new_pin_list: List[Tuple[str, float, float]] = []
             next_num = 1
-            for pin_idx, wx, wy in world_pins:
-                # World → chip-local-as-renderer-expects.
-                rx = wx - x
-                ry = wy - y
-                dx = rx * cti - ry * sti
-                dy = rx * sti + ry * cti
+            for pin_idx, dx, dy in local_pins:
                 if pin_idx < len(best_pins):
                     pin_name = best_pins[pin_idx]['name']
                 else:

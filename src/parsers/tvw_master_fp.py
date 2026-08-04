@@ -83,6 +83,8 @@ Public API
 - `pin_world_position(name, chip_xy, rot, pin_idx, master_fps)` -> (wx, wy)
 - `pins_world_positions(name, chip_xy, rot, master_fps)`
        -> list[(pin_idx, wx, wy)]
+- `pins_chip_local_positions(name, rot, master_fps)`
+       -> list[(pin_idx, dx, dy)] in the renderer's chip-local frame
 - `parse_master_footprint_outlines(buf)`
        -> dict[name, list[(x1, y1, x2, y2)]]
 - `apply_master_fp_transform(lx, ly, chip_xy, rot)` -> (wx, wy)
@@ -367,4 +369,39 @@ def pins_world_positions(
     for idx, lx, ly in pins:
         sx, sy = ly, lx
         out.append((idx, cx + sx * ct - sy * st, cy + sx * st + sy * ct))
+    return out
+
+
+def pins_chip_local_positions(
+    footprint_name: str,
+    rotation: float,
+    master_fps: Dict[str, List[Tuple[int, int, int]]],
+) -> List[Tuple[int, float, float]]:
+    """Return all pins of an instance as `(pin_index, dx, dy)` tuples in
+    the RENDERER's chip-local frame.
+
+    Shape geometry is stored relative to the chip origin and the renderer
+    re-applies the instance rotation as a standard CCW rotation by
+    `+rotation`. So the local offset a renderer needs is the inverse
+    rotation of the world offset that `pins_world_positions` produces:
+
+        world_offset = R(-rot) · (ly, lx)          # the cracked transform
+        local        = R(-rot) · world_offset      # undo R(+rot)
+                     = R(-2·rot) · (ly, lx)
+
+    Composing the two rotations into one collapses the whole
+    rotate-then-unrotate round trip (and the translate by chip_xy that
+    cancels out), which is why this takes no `chip_xy`: local coords are
+    translation-independent. Callers that want world coords keep using
+    `pins_world_positions`.
+    """
+    pins = master_fps.get(footprint_name)
+    if pins is None:
+        return []
+    theta = math.radians(-2.0 * rotation)
+    ct, st = math.cos(theta), math.sin(theta)
+    out: List[Tuple[int, float, float]] = []
+    for idx, lx, ly in pins:
+        sx, sy = ly, lx
+        out.append((idx, sx * ct - sy * st, sx * st + sy * ct))
     return out
