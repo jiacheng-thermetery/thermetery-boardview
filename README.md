@@ -22,6 +22,7 @@ repo.
 | Teboview — Compal / Lenovo  | `.tvw`                    | binary; auto-detected variant (Thinkpad NM-B501, etc.); connector + chip-class decoding |
 | Allegro Extracta `.fz`      | `.fz`                     | binary; ASRock = zlib-only, ASUS = RC6+zlib (needs an FZKey at `private/fz_key.txt`) |
 | XZZPCB (MSI / repair shops) | `.pcb`                    | binary, DES-encrypted; needs an XZZ key (see THIRD_PARTY_NOTICES.md) |
+| eM-Test Expert ICT set      | `.asc` (directory)        | five-file ASCII set (`format`/`parts`/`pins`/`nails`/`nets` .asc, mid-2000s ASUS); open any member file or the directory |
 
 The loader (`src/parsers/boardview.py`) dispatches by extension and content sniff.
 For the TVW binary format see [TVW_FORMAT.md](TVW_FORMAT.md) /

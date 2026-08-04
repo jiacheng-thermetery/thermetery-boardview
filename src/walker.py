@@ -7687,7 +7687,7 @@ class WalkerApp(tk.Tk):
     # Boardview extensions accepted by `parse_board()`. Kept as a class
     # attribute so the menu picker, the drop handler, and the wizard
     # all agree on what counts as a boardview file.
-    BOARD_EXTS = (".cad", ".brd", ".brd2", ".bv", ".tvw", ".fz", ".pcb")
+    BOARD_EXTS = (".cad", ".brd", ".brd2", ".bv", ".tvw", ".fz", ".pcb", ".asc")
 
     def _load_board_path(self, path: Path, *,
                          show_success_popup: bool = True) -> bool:
@@ -7743,12 +7743,13 @@ class WalkerApp(tk.Tk):
                    or (str(self.board_path.parent) if self.board_path else "."))
         path = filedialog.askopenfilename(
             title="Open boardview",
-            filetypes=[("Boardview", "*.cad *.brd *.brd2 *.bv *.tvw *.fz *.pcb"),
+            filetypes=[("Boardview", "*.cad *.brd *.brd2 *.bv *.tvw *.fz *.pcb *.asc"),
                        ("GENCAD", "*.cad"),
                        ("OpenBoardView ASCII", "*.brd *.brd2 *.bv"),
                        ("Teboview", "*.tvw"),
                        ("ASRock / ASUS Allegro Extracta", "*.fz"),
                        ("XZZPCB (MSI / repair shops)", "*.pcb"),
+                       ("eM-Test Expert ICT set (pick any member)", "*.asc"),
                        ("All files", "*.*")],
             initialdir=initial,
         )
