@@ -41,6 +41,9 @@ missing you can still supply the key:
 - **In the viewer** — opening such a board pops a dialog to paste the key,
   then offers to save it to `private/` for next time (opt-in; `private/` is
   gitignored).
+- **Settings → Decryption keys…** — a per-format key manager
+  (load/validate/save/clear) that shares its validation logic with the
+  Android key screen.
 - **Environment** — set `FZ_KEY` or `XZZPCB_KEY`.
 - **CLI** — `python -m src.viewer board.fz --key "<key>"`.
 
@@ -95,9 +98,15 @@ python -m src.viewer --smoke-test        # headless import/launch check
 > so you must run modules as packages (`python -m src.<module>`). Do not run
 > files directly from inside `src/` — relative imports will fail.
 
-> **Note:** The project uses a [src layout](https://packaging.python.org/en/latest/discussions/src-layout-vs-flat-layout/),
-> so you must run modules as packages (`python -m src.<module>`). Do not run
-> files directly from inside `src/` — relative imports will fail.
+### Tests
+
+```
+pip install pytest
+python -m pytest tests/
+```
+
+CI runs the suite on Windows and Ubuntu for every push and pull request
+(`.github/workflows/tests.yml`).
 
 ## Controls
 
@@ -181,30 +190,43 @@ warn at launch if any library is missing.
 ## Layout
 
 ```
-# Core (shared by the viewer and the experimental walker)
-src/parsers/boardview.py              unified loader — extension dispatch + content sniff
-src/parsers/gencad_parser.py          .cad  → BoardModel
-src/parsers/brd_parser.py             .brd / .brd2 / .bv  → BoardModel
-src/parsers/fz_parser.py              .fz (Allegro Extracta)  → BoardModel  (RC6 pieces MIT)
-src/parsers/xzzpcb_parser.py          .pcb (XZZPCB V1.0)  → BoardModel  (port of XZZPCBFile.cpp + dhuertas/DES, MIT)
-src/parsers/tvw_parser.py             .tvw  → BoardModel; variant dispatch (Gigabyte vs Compal/Lenovo)
-src/parsers/tvw_compal.py             Compal/Lenovo TVW decoder (chip enumeration, pin↔net, connectors)
-src/parsers/tvw_master_fp.py          TVW master-footprint pin-position decoder
-src/parsers/tvw_topology.py           TVW trace topology graph (segments + polylines)
-src/parsers/tvw_seg_27_unified_v3.py  TVW polyline / chain block scanner
-src/ratsnest.py                       synthetic ratsnest topology (when no trace geometry)
-src/parsers/native/rc6_native.c       optional C fast-path for RC6 (ASUS .fz)
-src/parsers/native/xzz_native.c       optional C fast-path for DES (XZZPCB)
-src/parsers/native/tvw_native.c       optional C fast-path for TVW scanners
+# Parsers (shared by the viewer, the walker, and the Android export)
+src/parsers/boardview.py           unified loader — one FORMATS table drives extension dispatch + content sniff
+src/parsers/gencad_parser.py       .cad  → BoardModel (also defines the BoardModel/Component/Shape contract)
+src/parsers/brd_parser.py          .brd / .brd2 / .bv  → BoardModel
+src/parsers/asc_parser.py          .asc directory set (eM-Test Expert ICT)  → BoardModel
+src/parsers/fz_parser.py           .fz (Allegro Extracta)  → BoardModel  (RC6 pieces MIT)
+src/parsers/xzzpcb_parser.py       .pcb (XZZPCB V1.0)  → BoardModel  (port of XZZPCBFile.cpp + dhuertas/DES, MIT)
+src/parsers/tvw_parser.py          .tvw  → BoardModel; variant dispatch (Gigabyte vs Compal/Lenovo)
+src/parsers/tvw_master_fp.py       TVW master-footprint pin-position decoder
+src/parsers/tvw_trace_scanners.py  TVW trace-record scanners (pads / segments / polylines / chains)
+src/tvw_compal.py                  Compal/Lenovo TVW decoder (chip enumeration, pin↔net, connectors)
+src/tvw_topology.py                TVW trace topology graph (segments + polylines, .topocache.pkl)
+src/ratsnest.py                    synthetic ratsnest topology (when no trace geometry)
+src/parsers/native/                optional C fast paths (RC6 / DES / TVW scanners) — see its README.md
 
-# Viewer / walker (entry points — run as `python -m src.<module>`)
-src/viewer.py                 Tk app + board canvas (CPU + GL tiers), drag-drop, library preflight
-src/walker.py                 diagnostic walk app (canvas + chat + walk-step engine)
+# Shared app core
+src/board_canvas.py           the two render-tier canvases (CPU + GL) + tier factory + layer palette
+src/ui_panels.py              autocomplete search, component pin list, net node list
+src/app_common.py             native-DLL preflight, warning popups, pin natural sort, JSON config store
+src/units.py                  units-per-mm span heuristic (shared with board_export)
+src/runtime_paths.py          writable-path policy, native-lib + private-key search paths
+src/key_store.py              decryption-key persistence + validation (shared with Android)
+
+# Apps (entry points — run as `python -m src.<module>`)
+src/viewer.py                 the viewer app: window, menus, file-open/key flow, key manager
+src/walker.py                 experimental diagnostic walk app (walk-step engine + chat panel)
 src/linker.py                 rules YAML × BoardModel → linked probe instructions
 src/signal_match.py           fuzzy signal-name matcher
 src/schematic_text.py         schematic PDF → per-page signal index
-src/convert_rules.py          .xlsx → rules.yaml converter
-src/*_probe.py / *_test.py    CLI probes and test drivers
+
+# Android
+android/                      Kotlin WebView app; bundles the parser core via Chaquopy
+board_export.py               BoardModel → JSON wire format for the Android renderer
+docs/android_contract.md      the desktop↔Android contract
+
+# Dev tools (not shipped; run as `python -m tools.<name>`)
+tools/                        format probes, verification drivers, rules converter — see tools/README.md
 
 # Build
 meson.build                   Meson build definition for native C libraries
@@ -212,7 +234,7 @@ meson.build                   Meson build definition for native C libraries
 # Docs / licensing
 TVW_FORMAT.md / .html         Teboview binary format spec
 THIRD_PARTY_NOTICES.md        MIT attributions (OpenBoardView, dhuertas/DES, inflex/teboviewformat)
-LICENSES/                     verbatim license texts for embedded MIT code
+LICENSES/                     verbatim license texts: embedded MIT code + bundled runtime components (PyOpenGL BSD, Tcl/Tk)
 ```
 
 ## Status
@@ -230,6 +252,8 @@ Boardview parsing verified across:
 - ASRock X370P-RO4, Z390 Pro4, Z97X Killer (FZ, zlib-only)
 - ASUS PRIME Z370-A, ASUS GTX 1080 Ti STRIX (FZ, zlib-only)
 - MSI V389 / 7913 / 7914 / 7A05 / 7A06 series, PS5 EDM-010 (XZZPCB)
+- ASUS N4L-VM DH 60-MJB000-C11 (eM-Test Expert `.asc` set — 1542 parts,
+  2006 nets, ICT via-nails)
 
 ## License
 
@@ -302,7 +326,7 @@ platforms:
                 kind: critical_rail
 ```
 
-`convert_rules.py` can translate an `.xlsx` (sheet = platform) into this
+`tools/convert_rules.py` can translate an `.xlsx` (sheet = platform) into this
 shape. `signal_match.py` fuzzy-matches canonical rule names (`VCCRTC`,
 `RSMRST#`) against decorated schematic/boardview net names;
 `schematic_text.py` indexes a vector-PDF schematic into a `signal →

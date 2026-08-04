@@ -4,8 +4,9 @@
 """
 Boardview viewer — pan/zoom canvas + component & net browser.
 
-Loads a boardview file (.cad / .brd / .brd2 / .bv / .tvw / .fz / .pcb) and
-renders it in an interactive Tk window. Drag to pan, mouse wheel to zoom,
+Loads a boardview (.cad / .brd / .brd2 / .bv / .tvw / .fz / .pcb, or an
+eM-Test Expert .asc directory set) and renders it in an interactive Tk
+window. Drag to pan, mouse wheel to zoom,
 Home or "Reset view" to fit-to-window. Click an IC to see its pins
 and per-pin nets; click a row in the Net tab to jump to that pin
 on the other side of the board (auto-flips layer).
