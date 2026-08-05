@@ -10,10 +10,10 @@ are reachable through traces and vias?" and get a real answer — used
 by the viewer's net-highlight overlay and by `find_broken_nets`.
 
 Inputs the module relies on:
-  * `tvw_seg_27_unified_v3` — the 5-pass binary scanner from Phase 1
-    (polyline blocks, tagged polylines, pad runs, segments, polyline
-    chains). We don't redo any of that work; we just feed the records
-    out of those scanners into a typed in-memory graph.
+  * `tvw_trace_scanners` — the 5-pass binary record scanner (polyline
+    blocks, tagged polylines, pad runs, segments, polyline chains). We
+    don't redo any of that work; we just feed the records out of those
+    scanners into a typed in-memory graph.
   * `tvw_parser._find_net_table` / `_build_net_index` — used in
     READ-ONLY fashion to decode the net-name table so net_id → net_name
     lookup works.
@@ -71,16 +71,15 @@ import struct
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
 # READ-ONLY imports of the Phase 1 / production code. We never mutate
 # anything here; we only call into them.
-from .parsers.tvw_seg_27_unified_v3 import (
+from .parsers.tvw_trace_scanners import (
     find_polyline_blocks,
     find_tagged_polylines_in_gap,
-    find_pad_runs_in_gap,
     find_segments_in_gap,
     find_polyline_chains_in_gap,
     merge_intervals,
@@ -1001,6 +1000,25 @@ class TraceGraph:
     # Diagnostics filled in during build.
     propagation_changes: int = 0
     propagation_conflicts: int = 0
+
+    # ---- lazily built query indexes --------------------------------------
+    # Deliberately NOT dataclass fields: they are pure derived caches, and
+    # a new field would be absent from the __dict__ of every already-written
+    # v10 topocache pickle (dataclass unpickling restores __dict__ without
+    # running __init__), turning a cache hit into an AttributeError and
+    # forcing a _CACHE_VERSION bump. As plain class attributes they resolve
+    # to None on cache-loaded graphs and get shadowed by a per-instance dict
+    # on first use.
+    #
+    # Each index is built on FIRST USE of the accessor that needs it, never
+    # during _build: `pads` / `segments` are lazily materialised numpy-backed
+    # properties, and building an index eagerly would force that
+    # materialisation for callers that never run these queries. The graph is
+    # immutable once built (union-find roots included), so the indexes stay
+    # valid for the object's lifetime.
+    _net_seg_index = None    # net_id -> list[Segment]
+    _net_pad_index = None    # net_id -> list[Pad]  (record net + propagated)
+    _root_pad_index = None   # union-find root -> list[pad_id]
 
     # ---- public construction ---------------------------------------------
 
@@ -2015,7 +2033,15 @@ class TraceGraph:
             else:
                 s = []
         else:
-            s = [seg for seg in self.segments if seg.net_id == net_id]
+            # No numpy arrays (legacy cache-loaded graph): bucket the
+            # already-materialised Segment list by net once instead of
+            # re-scanning all ~43 K segments on every call.
+            if self._net_seg_index is None:
+                by_net: Dict[int, List[Segment]] = defaultdict(list)
+                for seg in self.segments:
+                    by_net[seg.net_id].append(seg)
+                self._net_seg_index = by_net
+            s = list(self._net_seg_index.get(net_id, ()))
 
         # Polylines: filter the records list (small count, varying len)
         if self._poly_records:
@@ -2034,17 +2060,23 @@ class TraceGraph:
     def pads_on_net(self, net_id: int) -> List[Pad]:
         """All pads tagged with this net (plus pads whose node was
         propagated to this net)."""
-        out: List[Pad] = []
-        for pad in self.pads:
-            if pad.net_id == net_id:
-                out.append(pad)
-                continue
-            # Propagation may have given the pad's node a net even if
-            # the original record's net_id was 0.
-            node = self._pad_node.get(pad.pad_id, -1)
-            if node >= 0 and self._node_net[node] == net_id:
-                out.append(pad)
-        return out
+        if self._net_pad_index is None:
+            # One pass over the pads fills every net's bucket. A pad
+            # lands in the bucket of its record net_id and — when
+            # propagation gave its node a DIFFERENT net — in that net's
+            # bucket too, so no bucket can ever hold a pad twice. Pads
+            # are appended in `self.pads` order, which is the order the
+            # old per-call scan returned them in.
+            by_net: Dict[int, List[Pad]] = defaultdict(list)
+            for pad in self.pads:
+                by_net[pad.net_id].append(pad)
+                node = self._pad_node.get(pad.pad_id, -1)
+                if node >= 0:
+                    pnet = self._node_net[node]
+                    if pnet != pad.net_id:
+                        by_net[pnet].append(pad)
+            self._net_pad_index = by_net
+        return list(self._net_pad_index.get(net_id, ()))
 
     def connected_pads(self, start_pad_id: int) -> List[int]:
         """All pads in the same connected component as start_pad_id.
@@ -2054,12 +2086,16 @@ class TraceGraph:
         if node < 0:
             return []
         root = self._uf.find(node)
-        out: List[int] = []
-        for pad in self.pads:
-            pn = self._pad_node.get(pad.pad_id, -1)
-            if pn >= 0 and self._uf.find(pn) == root:
-                out.append(pad.pad_id)
-        return out
+        if self._root_pad_index is None:
+            # Union-find roots are stable once _build has finished, so
+            # one grouping pass serves every later query.
+            by_root: Dict[int, List[int]] = defaultdict(list)
+            for pad in self.pads:
+                pn = self._pad_node.get(pad.pad_id, -1)
+                if pn >= 0:
+                    by_root[self._uf.find(pn)].append(pad.pad_id)
+            self._root_pad_index = by_root
+        return list(self._root_pad_index.get(root, ()))
 
     def component_of(self, node_id: int) -> int:
         """Return the union-find root for the given node id."""
@@ -2115,7 +2151,20 @@ class TraceGraph:
 
 if __name__ == "__main__":
     import sys
-    target = sys.argv[1] if len(sys.argv) > 1 else KNOWN_BOARDS[0][1]
+
+    # The board path is required. Regions are auto-detected per board
+    # (there is no built-in board list to fall back on), and building a
+    # graph writes a `<path>.topocache.pkl` next to the source file, so
+    # we never guess at a target.
+    if len(sys.argv) < 2:
+        print("usage: python -m src.tvw_topology BOARD.tvw\n"
+              "\n"
+              "Builds the trace-topology graph for one TVW board and\n"
+              "prints the graph statistics. Writes/reuses a\n"
+              "`BOARD.tvw.topocache.pkl` cache next to the source file.",
+              file=sys.stderr)
+        sys.exit(2)
+    target = sys.argv[1]
     print(f"Building TraceGraph for {target} ...")
     g = TraceGraph.from_file(target)
     s = g.stats()

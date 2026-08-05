@@ -30,7 +30,7 @@ X570, B550, and BoardViewer.exe ground-truth on individual chips):
     name (0x02 = TOP, anything else = BOTTOM).
   - Pin grid synthesis: BGA names parsed into (column, row) for proper
     grid layout; numeric names distributed around the perimeter.
-  - Footprint sizing calibrated to file units (1 unit ≈ 0.000325 mm,
+  - Footprint sizing calibrated to file units (1 unit = 1 centi-mil,
     derived from board span ≈ ATX 305mm vs 938k chip-position units).
   - Net name table (3015 packed Pascal strings on Z490) at file offset
     ~+5987078 — kept as a list for reference.
@@ -65,12 +65,11 @@ import math
 import os
 import re
 import struct
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .gencad_parser import BoardModel, Component, Shape
-from .tvw_master_fp import parse_master_footprints, pins_world_positions
+from .tvw_master_fp import parse_master_footprints, pins_chip_local_positions
 
 # --------------------------------------------------------------------------
 # Optional C-DLL fast path for the two hottest cold-load scanners:
@@ -277,7 +276,8 @@ def _decode_position(buf: bytes, marker_off: int) -> Tuple[int, int, int]:
         i32s = struct.unpack('<8i', pre)
     except struct.error:
         return (0, 0, 0)
-    _y_alt, chip_y, chip_x, rot = i32s[0], i32s[1], i32s[2], i32s[3]
+    # i32s[0] is an alternate chip Y (close to i32s[1]); unused.
+    chip_y, chip_x, rot = i32s[1], i32s[2], i32s[3]
     # Snap rotation to nearest 90°
     if rot not in (0, 90, 180, 270):
         rot = (rot // 90 * 90) if 0 <= rot < 360 else 0
@@ -828,8 +828,8 @@ def _parse_gigabyte(
 
         # Populate shape.pins from the master footprint table when this
         # footprint is in there (~99 % of chips). Each master-fp pin has
-        # a known position in footprint-local coords; we transform to
-        # world via `pins_world_positions`, then convert back to the
+        # a known position in footprint-local coords;
+        # `pins_chip_local_positions` maps those straight into the
         # chip-local frame the renderer expects (so the renderer's
         # standard rotation reproduces the world position). Pin names
         # come from the file's per-chip pin records by index, with
@@ -839,20 +839,13 @@ def _parse_gigabyte(
         # synthesizer just like before.
         master_pins = master_fps.get(chip['footprint'])
         if master_pins:
-            theta_inv = math.radians(-rot)
-            cti, sti = math.cos(theta_inv), math.sin(theta_inv)
-            world_pins = pins_world_positions(
-                chip['footprint'], (x, y), rot, master_fps,
+            local_pins = pins_chip_local_positions(
+                chip['footprint'], rot, master_fps,
             )
             existing_names = {p['name'] for p in best_pins}
             new_pin_list: List[Tuple[str, float, float]] = []
             next_num = 1
-            for pin_idx, wx, wy in world_pins:
-                # World → chip-local-as-renderer-expects.
-                rx = wx - x
-                ry = wy - y
-                dx = rx * cti - ry * sti
-                dy = rx * sti + ry * cti
+            for pin_idx, dx, dy in local_pins:
                 if pin_idx < len(best_pins):
                     pin_name = best_pins[pin_idx]['name']
                 else:
@@ -1101,12 +1094,16 @@ def _add_perimeter_pins(shape, names: List[str], w: float, h: float) -> None:
         shape.pins.append((name, x, y))
 
 
-# TVW coordinate-unit calibration. Empirically derived:
-#   Z490 chip-position X span (1st-99th percentile, excluding mounting-hole
-#   outliers) ≈ 887,050 units. The Z490 VISION G is an ATX board, ~305 mm
-#   long → 1 unit ≈ 0.000325 mm. All sizes in `_footprint_size_raw` are
-#   in mm × 1000; we scale by `_UNITS_PER_MM` to convert to file units.
-_UNITS_PER_MM = 3.077  # 1 mm ≈ 3077 TVW units
+# TVW coordinate unit: one centi-mil (1/100,000 inch, 0.254 um), i.e.
+# 3,937 file units per mm. Verified three independent ways on the Z490:
+# component span 915,387 x 1,158,840 units = 232 x 294 mm against the
+# 305 x 244 mm ATX spec; PCIe x16 pin pitch 3,940 units for 1.00 mm;
+# DDR4 slot pitch 3,346 units for 0.85 mm. (An earlier calibration got
+# 3.077 by dividing the SHORT-axis component span by the LONG 305 mm
+# ATX dimension, under-sizing every fallback footprint by 22%.)
+# `_footprint_size_mm` values are physical sizes in mm x 1000; this
+# constant converts them to file units.
+_UNITS_PER_MM = 3.937  # mm x 1000 -> centi-mil file units
 
 
 def _footprint_size(fp: str) -> Tuple[float, float]:
@@ -1211,29 +1208,29 @@ def _footprint_size_mm(fp: str) -> Tuple[float, float]:
 
     # Resistors / capacitors / diodes by package code
     if "0201" in f:
-        return (700, 350)
+        return (600, 300)
     if "0402" in f:
-        return (1200, 700)
+        return (1000, 500)
     if "0603" in f:
-        return (1800, 1000)
+        return (1600, 800)
     if "0805" in f:
-        return (2400, 1400)
+        return (2000, 1250)
     if "1206" in f:
-        return (3500, 1800)
+        return (3200, 1600)
     if "1210" in f:
-        return (3500, 2700)
+        return (3200, 2500)
 
     # Inductors / chokes
     m = re.search(r'CHOKE(\d+)X(\d+)', f)
     if m:
-        return (int(m.group(1)) * 1100, int(m.group(2)) * 1100)
+        return (int(m.group(1)) * 1000, int(m.group(2)) * 1000)
     if "CHOKE" in f or "FERRI" in f or "INDUCT" in f:
         return (8000, 6000)
 
     # Electrolytic / tantalum caps with mm dimensions in name
     m = re.search(r'EC(\d+)D(\d+)MM', f) or re.search(r'EC(\d+)X(\d+)', f)
     if m:
-        return (int(m.group(1)) * 1100, int(m.group(2)) * 1100)
+        return (int(m.group(1)) * 1000, int(m.group(2)) * 1000)
     if "TANT" in f:
         return (4000, 3000)
 

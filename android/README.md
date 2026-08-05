@@ -14,15 +14,19 @@ anything here.
 | `settings.gradle.kts`, `build.gradle.kts`, `gradle.properties`, `app/build.gradle.kts` | Gradle config (AGP 8.7.3, Kotlin 2.0.21, Chaquopy 17.0.0) | shell |
 | `app/src/main/java/com/thermetery/boardview/` | Kotlin sources | shell |
 | `app/src/main/res/` | theme + launcher icon | shell |
-| `app/src/main/assets/` | viewer.html / viewer.js / viewer.css | renderer agent |
+| `app/src/main/assets/` | viewer.html / viewer.js / viewer.css (architecture notes: `../docs/WEB_CORE.md`) | renderer agent |
 | `app/src/main/jniLibs/` | prebuilt `lib{tvw,xzz,rc6}_native.so` (arm64-v8a, x86_64) | already built — do not touch |
 
 Python sources are **not** checked in under `android/` — a Gradle task
-(`:app:stagePythonSources`) copies the exact 14-module list from the repo
-root into `app/build/staged-python/` before Chaquopy packages them
-(contract §6). If the build fails with `stagePythonSources: missing
-module(s)`, the named file does not exist at the repo root yet — supply the
-module, never edit the staging list.
+(`:app:stagePythonSources`) copies the curated module list from the repo
+root into `app/build/staged-python/` before Chaquopy packages them,
+preserving the `src/` package paths (contract §6). The authoritative
+list is `pythonRootModules` + `pythonPackageModules` in
+`app/build.gradle.kts` (`board_export.py` plus the `src/` parser core,
+19 files today). If the build fails with `stagePythonSources: missing
+module(s)`, the named file does not exist at the repo root — supply the
+module or update the staging list *together with* the code change that
+moved it.
 
 ## Build (local machine paths)
 

@@ -31,6 +31,8 @@ val pythonPackageModules = listOf(
     "src/__init__.py",
     "src/ratsnest.py",
     "src/runtime_paths.py",
+    // board_export imports the shared units_per_mm heuristic.
+    "src/units.py",
     // board_export.validate_key delegates to src.key_store (shared with the
     // desktop key manager); it must ship or the key screen crashes on validate.
     "src/key_store.py",
@@ -44,7 +46,7 @@ val pythonPackageModules = listOf(
     "src/parsers/asc_parser.py",
     "src/parsers/tvw_parser.py",
     "src/parsers/tvw_master_fp.py",
-    "src/parsers/tvw_seg_27_unified_v3.py",
+    "src/parsers/tvw_trace_scanners.py",
     "src/parsers/fz_parser.py",
     "src/parsers/xzzpcb_parser.py",
     "src/parsers/tvw_native.py",

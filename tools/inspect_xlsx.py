@@ -42,7 +42,7 @@ def dump_sheet(wb, sheet_name):
         s = (str(v) if v is not None else "").replace("\n", " ").strip()
         print(f"  {r}: {s[:80]!r}")
 
-    print(f"\nrows:")
+    print("\nrows:")
     for r in range(1, sheet.max_row + 1):
         parts = []
         for c in range(1, sheet.max_column + 1):

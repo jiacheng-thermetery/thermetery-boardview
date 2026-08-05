@@ -153,5 +153,108 @@ class AscParserTests(unittest.TestCase):
                 parse(lone)
 
 
+def _mini_set(prefix: str, refdes: str) -> dict:
+    parts = _BANNER + f"""
+ Parts List              0/1 Selected Parts             15-Jun-2006 9:52
+                                                        INCH units
+
+Part             X         Y     Rot  Grid  T/B  'Device', 'Outline'
+
+{refdes}           1.000     1.000    0.0  A1   (T)  'DEV', 'OUT'
+"""
+    pins = _BANNER + f"""
+ Part Pins List          0/1 Selected Parts             15-Jun-2006 9:52
+                                                        INCH units
+
+Part {refdes}     (T)
+
+   1    1     1.000     1.050     1    NET_{refdes}
+"""
+    name = (prefix + "_") if prefix else ""
+    return {f"{name}parts.asc": parts, f"{name}pins.asc": pins}
+
+
+class AscMultiBoardDirectoryTests(unittest.TestCase):
+    """Regression tests: a directory holding several boards' flattened
+    exports must never load or splice the wrong board's files."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        for prefix, refdes in (("boarda", "AAAA"), ("boardb", "BBBB")):
+            for fname, text in _mini_set(prefix, refdes).items():
+                (self.dir / fname).write_text(text, encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_opened_file_selects_its_own_board(self):
+        model = parse(self.dir / "boardb_pins.asc")
+        self.assertEqual(list(model.components), ["BBBB"])
+        model = parse(self.dir / "boarda_parts.asc")
+        self.assertEqual(list(model.components), ["AAAA"])
+
+    def test_no_splicing_across_prefix_groups(self):
+        # boarda has parts+pins; an unrelated zboard contributes only
+        # nails — it must NOT be grafted onto boarda's model.
+        (self.dir / "zboard_nails.asc").write_text(_NAILS, encoding="utf-8")
+        model = parse(self.dir / "boarda_parts.asc")
+        self.assertEqual(list(model.components), ["AAAA"])
+
+    def test_directory_open_prefers_bare_names(self):
+        _write_set(self.dir)  # adds the canonical bare parts/pins/... set
+        model = parse(self.dir)
+        self.assertIn("U1", model.components)
+        self.assertNotIn("AAAA", model.components)
+
+
+class AscEdgeCaseTests(unittest.TestCase):
+    def test_nail_on_pin_of_via_named_component_is_skipped(self):
+        nails = _BANNER + """
+ Test Fixture Nails    2/2 Selected Drills           15-Jun-2006 9:52
+                       2 Nails, 2 Nets               INCH units
+
+Nail         X         Y   Type Grid T/B  Net   Net Name   Virtual Pin/Via
+
+$1         0.100     0.100   1  A1   (B)  #1    REALVIA          V VIA .
+$2         0.200     0.200   1  A1   (B)  #2    PINNET           V PIN VIA1.3
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            for fname, text in _mini_set("", "VIA1").items():
+                (d / fname).write_text(text, encoding="utf-8")
+            (d / "nails.asc").write_text(nails, encoding="utf-8")
+            model = parse(d)
+            # $1 targets a via -> synthetic component; $2 targets pin
+            # VIA1.3 -> must be skipped despite "VIA" in the refdes.
+            self.assertIn("$1", model.components)
+            self.assertNotIn("$2", model.components)
+
+    def test_mm_units_with_padded_header(self):
+        files = _mini_set("", "U9")
+        files["parts.asc"] = files["parts.asc"].replace(
+            "INCH units", "MM   UNITS")
+        files["pins.asc"] = files["pins.asc"].replace(
+            "INCH units", "MM   UNITS")
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            for fname, text in files.items():
+                (d / fname).write_text(text, encoding="utf-8")
+            model = parse(d)
+            u9 = model.components["U9"]
+            # 1.0 "mm" -> 39.37 mils, not 1000 (inch scaling)
+            self.assertAlmostEqual(u9.x, 39.37, places=2)
+
+    def test_net_literally_named_nc_is_kept(self):
+        files = _mini_set("", "K1")
+        files["pins.asc"] = files["pins.asc"].replace("NET_K1", "NC")
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            for fname, text in files.items():
+                (d / fname).write_text(text, encoding="utf-8")
+            model = parse(d)
+            self.assertIn("NC", model.signals)
+
+
 if __name__ == "__main__":
     unittest.main()

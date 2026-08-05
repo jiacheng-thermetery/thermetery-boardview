@@ -18,22 +18,14 @@ back to the pure-Python implementation.
 from __future__ import annotations
 
 import ctypes
-import os
-import sys
 from pathlib import Path
 from typing import Optional
+
+from ..runtime_paths import native_lib_candidates
 
 
 _LIB: Optional[ctypes.CDLL] = None
 _LOAD_ATTEMPTED = False
-
-
-def _candidate_names() -> list[str]:
-    if sys.platform.startswith("win"):
-        return ["xzz_native.dll", "libxzz_native.dll"]
-    if sys.platform == "darwin":
-        return ["xzz_native.dylib", "libxzz_native.dylib"]
-    return ["xzz_native.so", "libxzz_native.so"]
 
 
 def _load() -> Optional[ctypes.CDLL]:
@@ -45,23 +37,7 @@ def _load() -> Optional[ctypes.CDLL]:
     _LOAD_ATTEMPTED = True
 
     here = Path(__file__).resolve().parent
-    candidates: list[str] = []
-    env_dir = os.environ.get("BOARDVIEW_NATIVE_DIR")
-    if env_dir:
-        candidates += [str(Path(env_dir) / n) for n in _candidate_names()]
-    # Restructured (src-layout) location: libs live in the native/ subdir.
-    candidates += [str(here / 'native' / n) for n in _candidate_names()
-                   if (here / 'native' / n).exists()]
-    # Legacy flat layout: lib sitting next to this module.
-    candidates += [str(here / n) for n in _candidate_names()
-                   if (here / n).exists()]
-    if not sys.platform.startswith("win"):
-        # Android/APK and system installs: the lib may not exist as a plain
-        # file next to this module (it lives in the app's nativeLibraryDir,
-        # or this module is packaged inside a zip). A bare soname lets
-        # dlopen search the dynamic linker's own paths.
-        candidates += [n for n in _candidate_names() if n.startswith("lib")]
-    for cand in candidates:
+    for cand in native_lib_candidates(here, "xzz_native"):
         try:
             lib = ctypes.CDLL(cand)
         except OSError:

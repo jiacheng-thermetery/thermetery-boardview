@@ -19,9 +19,9 @@ which does not exist on Android). Only parser modules are imported.
 
 Coordinate / transform provenance — replicated from viewer.py:
 
-* Pin world transform (absolute pin coords): viewer.py:1720-1726
-  (``_find_pin_at``, the hit-testing path; identical math at
-  viewer.py:744-746, 1517-1522, 3025-3050)::
+* Pin world transform (absolute pin coords): board_canvas.py
+  (``_find_pin_at``, the hit-testing path; identical math in the
+  pin-draw and measurement paths)::
 
       theta = math.radians(comp.rotation)
       ct, st = math.cos(theta), math.sin(theta)
@@ -31,31 +31,32 @@ Coordinate / transform provenance — replicated from viewer.py:
   Note there is deliberately NO per-component mirror for BOTTOM-layer
   components: in viewer.py the BOTTOM-view mirror is a *view* transform
   applied to the whole world at projection time
-  (viewer.py:775-781 ``if (self._view_layer == "BOTTOM") ^ self._mirror_x``),
+  (board_canvas.py _apply_view_transform: ``if (self._view_layer == "BOTTOM") ^ self._mirror_x``),
   never baked into world coordinates. World coords here match what the
   desktop hit-testing sees.
 
-* Component outline polygon: viewer.py:883-904
+* Component outline polygon: board_canvas.py
   (``_component_polygon_world``) — shape.bbox() padded by 5 units per
   side, 4 corners rotated by the same rotation matrix; None when the
   shape is missing/degenerate (extent < 0.5 in both axes).
 
-* Segment layer encoding: viewer.py:3097-3121 (``_segments_arrays``) —
+* Segment layer encoding: board_canvas.py (``_segments_arrays``) —
   ``topo._seg_arrays["layer"]`` is a uint8 index into
   ``topo._layer_names`` (out-of-range bytes fall back to TOP); when a
   graph has no layer table the historical 2-layer encoding applies
   (byte 0 = TOP, anything else = BOTTOM).
 
-* Key-prompt detection: viewer.py:5117-5135 and 5151-5197
+* Key-prompt detection: viewer.py
   (``_open_board_path`` / ``_load_with_key_prompt``) — FZKeyError from
   the ASUS .fz path carries ``.reason`` ("missing"/"invalid"); XZZ .pcb
   parses without raising but sets ``model.key_required`` when no valid
   key was in play (a supplied key that fails the parity check also
   lands here -> "invalid").
 
-* units_per_mm heuristic: viewer.py:512-534 (``units_per_mm``) —
-  component-extent span > 50,000 file units => centi-mil (3937.0 u/mm),
-  else mil (39.37 u/mm); null when there are no components to measure.
+* units_per_mm heuristic: src/units.py (``units_per_mm_for_span``,
+  shared with the desktop canvases) — component-extent span > 50,000
+  file units => centi-mil (3937.0 u/mm), else mil (39.37 u/mm); null
+  when there are no components to measure.
 """
 
 from __future__ import annotations
@@ -66,6 +67,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.parsers.boardview import BoardModel, FZKeyError, parse as parse_board
+from src.units import units_per_mm_for_span
 
 _COMPACT = (",", ":")
 
@@ -112,7 +114,7 @@ def _num(v) -> float:
 def _layer_index(layer: str) -> int:
     """Component layer -> index. TOP=0 / BOTTOM=1 always (contract SS1).
     Component.layer is constrained to TOP/BOTTOM by the data model (see
-    viewer.py:299-310); anything unexpected falls back to TOP."""
+    parsers; see gencad_parser.Component); anything unexpected falls back to TOP."""
     return 1 if str(layer).upper() == "BOTTOM" else 0
 
 
@@ -137,8 +139,8 @@ def _component_outline(
     local_bbox: Optional[Tuple[float, float, float, float]] = None,
     transform: Optional[Tuple[float, float, float, float]] = None,
 ) -> Optional[List[List[float]]]:
-    """Absolute outline polygon — replicates viewer.py:883-904
-    (_component_polygon_world): shape bbox + 5-unit pad, 4 corners
+    """Absolute outline polygon — replicates board_canvas.py's
+    _component_polygon_world: shape bbox + 5-unit pad, 4 corners
     rotated about the component origin. None => renderer uses bbox."""
     if shape is None or not shape.pins:
         return None
@@ -185,20 +187,20 @@ def _open_board(path: str, key: Optional[str]) -> str:
     p = Path(path)
     fmt = _EXT_FORMAT.get(p.suffix.lower(), "?")
 
-    # ---- parse, mirroring viewer.py:5117-5135 (_open_board_path) ---------
+    # ---- parse, mirroring viewer.py's _open_board_path ---------
     try:
         model = parse_board(p, key=key)
     except FZKeyError as exc:
-        # ASUS (RC6) .fz with a missing or bad key (viewer.py:5120-5123).
+        # ASUS (RC6) .fz with a missing or bad key (see viewer._open_board_path).
         return _fail("key_required", getattr(exc, "reason", "missing"), "fz")
     except Exception as exc:
         return _fail("parse_error", f"{type(exc).__name__}: {exc}", fmt)
 
     # XZZPCB parses its cleartext sections even without a key but flags
-    # model.key_required (viewer.py:5130-5135 offers the prompt; the
+    # model.key_required (viewer._open_board_path offers the prompt; the
     # Android shell owns the retry loop, so we just report). A key that
     # was supplied but failed the parity check is "invalid"
-    # (viewer.py:5183-5187), no key at all is "missing".
+    # (viewer._load_with_key_prompt), no key at all is "missing".
     if getattr(model, "key_required", False):
         return _fail("key_required",
                      "invalid" if key else "missing",
@@ -210,7 +212,7 @@ def _open_board(path: str, key: Optional[str]) -> str:
     nets: List[str] = list(model.signals.keys())
     net_index: Dict[str, int] = {n: i for i, n in enumerate(nets)}
 
-    # pin -> net index, replicating viewer.py:4906-4910 (_build_pin_to_net:
+    # pin -> net index, replicating viewer._build_pin_to_net (
     # last assignment wins on duplicate (refdes, pin) keys).
     pin_net: Dict[Tuple[str, str], int] = {}
     for net_name, nodes in model.signals.items():
@@ -239,7 +241,7 @@ def _open_board(path: str, key: Optional[str]) -> str:
             comp_miny = cy
         if cy > comp_maxy:
             comp_maxy = cy
-        # Pin world transform — viewer.py:1720-1726 (see module docstring).
+        # Pin world transform — board_canvas._find_pin_at (see module docstring).
         rotation = _num(comp.rotation)
         theta = math.radians(rotation)
         ct, st = math.cos(theta), math.sin(theta)
@@ -283,7 +285,7 @@ def _open_board(path: str, key: Optional[str]) -> str:
         )
 
         # Component bbox: prefer the outline polygon (what the desktop
-        # hit-tests against, viewer.py:914-918 _bbox_of_points over the
+        # hit-tests against, board_canvas._bbox_of_points over the
         # polygon); fall back to the absolute pin extent, then to the
         # origin point for shapeless components.
         if outline is not None:
@@ -337,7 +339,7 @@ def _open_board(path: str, key: Optional[str]) -> str:
 
     if components:
         component_span = max(comp_maxx - comp_minx, comp_maxy - comp_miny)
-        units_per_mm = 3937.0 if component_span > 50_000 else 39.37
+        units_per_mm = units_per_mm_for_span(component_span)
     else:
         units_per_mm = None
 
@@ -426,7 +428,7 @@ def _load_traces() -> str:
     layer_names = list(getattr(topo, "_layer_names", []) or [])
 
     if seg_arr is not None:
-        # Numpy fast path — replicates viewer.py:3097-3121
+        # Numpy fast path — replicates board_canvas._segments_arrays
         # (_segments_arrays): `layer` is a uint8 index into
         # `topo._layer_names`; out-of-range bytes fall back to TOP; a
         # graph with no layer table uses the historical 2-layer
@@ -460,7 +462,7 @@ def _load_traces() -> str:
         else:
             seg_width = [0] * len(seg_x1)
     else:
-        # Legacy dataclass path (viewer.py:3123-3138): seg.layer is the
+        # Legacy dataclass path (board_canvas._segments_arrays fallback): seg.layer is the
         # layer NAME string here.
         name_to_out: Dict[str, int] = {"TOP": 0, "BOTTOM": 1}
         for seg in topo.segments:

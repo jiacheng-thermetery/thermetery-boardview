@@ -26,7 +26,7 @@ from collections import Counter
 from pathlib import Path
 from typing import List
 
-from .schematic_text import extract_index, SchematicIndex
+from src.schematic_text import extract_index, SchematicIndex
 
 
 def _summarise(idx: SchematicIndex) -> str:

@@ -1,6 +1,6 @@
 """Render-tier verification + frame-time benchmark.
 
-Loads each of Z490, B550, X570 in turn through walker.make_board_canvas,
+Loads each of Z490, B550, X570 in turn through board_canvas.make_board_canvas,
 selects a known net (VCORE on Z490; the highest-pad-count net on the
 others — generally still VCORE / GND / a major rail), then times one
 redraw at zoom 1.0, 2.96 and 8.0 with traces enabled.
@@ -11,7 +11,7 @@ Output:
 If GL fails to initialise on this box, the script downgrades the test
 to a cpu-tier smoke test instead of failing.
 
-Run from the project directory:  `python walker_render_test.py`
+Run from the project directory:  `python -m tools.walker_render_test`
 """
 from __future__ import annotations
 
@@ -24,15 +24,15 @@ from typing import List, Optional, Tuple
 
 import tkinter as tk
 
-from . import walker
-from .parsers.boardview import parse as parse_board
+from src import board_canvas
+from src.parsers.boardview import parse as parse_board
 
 
 BOARDS: List[Tuple[str, str, Optional[str]]] = [
     # (label, tvw path, default net to highlight or None for auto-pick)
-    ("Z490", r"C:\Claude Code\Z490 VISION G r1.0.tvw",                "VCORE"),
-    ("B550", r"C:\Claude Code\B550_AORUS_PRO_AC_REV1.0.tvw",          None),
-    ("X570", r"C:\Claude Code\Gigabyte_X570_GAMING_X_REV1.01.tvw",    None),
+    ("Z490", r"C:\thermetery-boardview\boardviews\Z490 VISION G r1.0.tvw",             "VCORE"),
+    ("B550", r"C:\thermetery-boardview\boardviews\B550_AORUS_PRO_AC_REV1.0.tvw",       None),
+    ("X570", r"C:\thermetery-boardview\boardviews\Gigabyte_X570_GAMING_X_REV1.01.tvw", None),
 ]
 
 # Frame zooms to time. The middle one (~2.96) is the "typical
@@ -132,7 +132,8 @@ def run_one(label: str, tvw_path: str, default_net: Optional[str]) -> None:
     root.geometry(f"{W}x{H}+0+0")
     root.title(f"render-test {label}")
 
-    canvas = walker.make_board_canvas(root, board)
+    canvas = board_canvas.make_board_canvas(root, board,
+                                        force_cpu_env="WALKER_FORCE_CPU")
     canvas.pack(fill="both", expand=True)
     root.update_idletasks()
     root.update()
@@ -176,12 +177,12 @@ def main():
     args = ap.parse_args()
 
     if args.gl_probe_only:
-        ok = walker._probe_gl_canvas(verbose=True)
+        ok = board_canvas._probe_gl_canvas(verbose=True)
         print(f"GL probe: {'OK' if ok else 'FAIL'}")
         sys.exit(0 if ok else 1)
 
-    print(f"_GL_AVAILABLE = {walker._GL_AVAILABLE}")
-    print(f"GL probe: {walker._gl_probe_cached()}")
+    print(f"_GL_AVAILABLE = {board_canvas._GL_AVAILABLE}")
+    print(f"GL probe: {board_canvas._gl_probe_cached()}")
     print()
 
     for label, path, default_net in BOARDS:

@@ -28,7 +28,7 @@ means unknown/none.
   "version": 1,
   "meta": {
     "title": "Gigabyte_X570_GAMING_X_REV1.01",   // display name (file stem)
-    "format": "tvw",          // tvw | tvw-compal | fz | xzzpcb | gencad | brd
+    "format": "tvw",          // tvw | tvw-compal | fz | xzzpcb | gencad | brd | asc
     "warnings": ["..."],      // BoardModel.warnings if present, else []
     "units_per_mm": null,     // float when known, else null
     "bbox": [minx, miny, maxx, maxy],   // overall board bounds from pins+outlines
@@ -100,6 +100,9 @@ current board in a module-global):
 def open_board(path: str, key: str | None = None) -> str:   # JSON per §1
 def load_traces() -> str:                                    # JSON per §1
 def ping() -> str:    # '{"ok": true, "native": {"tvw": true, "xzz": true, "rc6": true}}'
+def validate_key(fmt: str, key_text: str) -> str  # "ok" | human-readable problem;
+                                                  # shared with the desktop key
+                                                  # manager via src/key_store.py
 ```
 
 - Returns JSON **strings** (never dicts) — one `json.dumps`, compact separators.
@@ -124,6 +127,7 @@ bv.onError(text)    // toast/banner, auto-dismiss
 ```js
 Android.openFilePicker()  // SAF picker; shell parses; later calls bv.onBoard(...)
 Android.loadTraces()      // async; shell later calls bv.onTraces(...)
+Android.openKeyManager()  // launches KeyManagerActivity (per-format key screen)
 Android.log(msg)          // logcat passthrough (tag "BoardviewJS")
 ```
 
@@ -143,6 +147,8 @@ how the renderer is developed and tested without Android.
 - Layer cycle button (TOP/BOTTOM/inner when present): components on other
   layers ghosted; segments filtered to layer, selected net always shown on
   all layers.
+- View rotation: two toolbar buttons rotate the view in 90-degree steps
+  (state threaded through fit/hit-test/rasterize).
 - Traces toggle button: first press calls `Android.loadTraces()` (or loads
   from the dev-harness JSON if it already has segments).
 - Search box with prefix autocomplete over refdes and nets (datalist is fine).
@@ -171,23 +177,40 @@ how the renderer is developed and tested without Android.
   device" → `filesDir/keys/<fmt>.txt`; pass remembered key automatically on
   next `open_board` failure of that format. `android:allowBackup="false"`.
 - Chaquopy: Python 3.13, `pip { install "numpy==1.26.2" }`, abiFilters
-  arm64-v8a + x86_64. Python sources staged by a Gradle copy task from the
-  repo root — exact module list:
-  `board_export.py, boardview.py, gencad_parser.py, brd_parser.py,
-   tvw_parser.py, tvw_master_fp.py, tvw_compal.py, tvw_topology.py,
-   tvw_seg_27_unified_v3.py, fz_parser.py, xzzpcb_parser.py, ratsnest.py,
-   tvw_native.py, xzz_native.py`
-  (NEVER glob the repo root — it contains a gitignored sample board and
-  Windows DLLs.)
+  arm64-v8a + x86_64. Python sources staged by a Gradle copy task
+  (`:app:stagePythonSources`) from the repo root, **preserving the
+  `src/` package paths** (the parser core uses relative imports and
+  cannot be flattened). The authoritative module list lives in
+  `android/app/build.gradle.kts` (`pythonRootModules` +
+  `pythonPackageModules`): `board_export.py` at the staged root plus
+  the `src/` package (`__init__.py, ratsnest.py, runtime_paths.py,
+  key_store.py, units.py, tvw_compal.py, tvw_topology.py`) and
+  `src/parsers/` (`__init__.py, boardview.py, gencad_parser.py,
+  brd_parser.py, asc_parser.py, tvw_parser.py, tvw_master_fp.py,
+  tvw_trace_scanners.py, fz_parser.py, xzzpcb_parser.py,
+  tvw_native.py, xzz_native.py`). The Gradle task fails the build if a
+  listed file is missing — when a module moves or a new import is
+  added to the core, update the list in the same change. (NEVER glob
+  the repo root — it contains gitignored sample boards and Windows
+  DLLs.)
 - minSdk 24, targetSdk 35, versionName from repo git describe if easy, else
   hardcode `0.1.0`.
 - Local toolchain on this machine: JDK `C:\Android\jdk-17.0.19+10`, Gradle
   `C:\Android\gradle-8.10.2\bin\gradle.bat`, SDK `C:\Android\sdk`
-  (build-tools 34/35, platform android-35), local buildPython =
-  `C:\ProgramData\anaconda3\python.exe` (3.11). No Gradle wrapper needed —
+  (build-tools 34/35, platform android-35). Chaquopy 17 requires
+  buildPython's minor version to match the target (3.13):
+  `C:/Users/Administrator/AppData/Local/Python/pythoncore-3.13-64/python.exe`
+  (the older anaconda 3.11 does not work). No Gradle wrapper needed —
   invoke the local Gradle directly with `-p android`.
 
 ## 7. What v1 explicitly does NOT include
 
 Measurement tool, walker/diagnostics, .fz decrypted-text cache (disabled on
 Android — native RC6 makes it unnecessary), Play Store packaging, x86 32-bit.
+
+Also not supported: opening eM-Test Expert `.asc` sets from the picker.
+The format is a *directory* of sibling files, but the shell copies a
+single SAF stream to `cacheDir/boards/`, so the parser cannot find the
+siblings. `asc_parser.py` still ships in the APK (boardview.py imports
+it unconditionally); on-device support would need a folder picker +
+multi-file copy.

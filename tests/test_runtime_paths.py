@@ -18,7 +18,10 @@ class RuntimePathTests(unittest.TestCase):
             self.assertEqual(runtime_paths.private_dir(), Path("private"))
 
     def test_explicit_data_root_has_precedence(self):
-        root = Path("C:/managed data/\u6d4b\u8bd5")
+        # Platform-neutral absolute path: "C:/..." is not absolute on
+        # POSIX (managed_data_dir would CWD-resolve it), which made this
+        # test Windows-only until CI started running on Linux.
+        root = Path(tempfile.gettempdir()).resolve() / "managed data" / "\u6d4b\u8bd5"
         with mock.patch.dict(
             os.environ, {runtime_paths.DATA_DIR_ENV: str(root)}, clear=True
         ):

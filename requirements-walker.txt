@@ -11,11 +11,8 @@
 
 -r requirements.txt
 
-meson>=1.5
-ninja>=1.12
-
 PyYAML>=6.0        # rules YAML
-openpyxl>=3.1      # convert_rules.py / inspect_xlsx.py (.xlsx rules import)
+openpyxl>=3.1      # tools/convert_rules.py / tools/inspect_xlsx.py (.xlsx rules import)
 pymupdf>=1.23      # schematic_text.py (schematic-PDF signal indexing)
 anthropic>=0.50    # chat panel (Claude backend)
 openai>=1.50       # chat panel (OpenAI backend)

@@ -11,7 +11,7 @@ the Gigabyte TVW convention in several structural places:
   * Chip enumeration uses a multi-source union: Region 3 (primary,
     chip records anchored by `00 00 00 00 + Pascal-refdes`) plus the
     cap-section (the historical `0x01 + Pascal-dev + Pascal-fp` chips
-    that tvw_parser._find_chip_headers already finds) plus Region 1
+    that tvw_parser._chip_headers already finds) plus Region 1
     (a supervised layer-flag table identified by a `0xbb800 / 0x12c00`
     constants signature).
   * Layer pads are 19-byte stride records for ALL 10 copper layers,
@@ -432,7 +432,7 @@ def _scan_r1_layers_py(data: bytes) -> Dict[str, int]:
 
 def _scan_cap_section_layers(data: bytes) -> Dict[str, int]:
     """For each cap-section chip record (the historical `0x01 +
-    Pascal-dev + Pascal-fp` markers found by tvw_parser._find_chip_headers),
+    Pascal-dev + Pascal-fp` markers found by tvw_parser._chip_headers),
     return ``{refdes -> layer_byte}`` from the cap-section trailer at
     `after_off + 20`.
 
@@ -445,8 +445,15 @@ def _scan_cap_section_layers(data: bytes) -> Dict[str, int]:
     # (Gigabyte: layer byte at +9; Compal: layer byte at +20 past a
     # leading 11-char "SE...T" / "SGA...T" / "SH...T" part code), and
     # we use the Compal offset here.
-    from .parsers.tvw_parser import _find_chip_headers, _decode_refdes
-    chips = _find_chip_headers(data)
+    #
+    # `_chip_headers` is the accelerated wrapper: it prefers the C port
+    # in tvw_native.dll and falls back to the pure-Python
+    # `_find_chip_headers` when the DLL is absent, returning the same
+    # list of {off, dev_name, footprint, after_off} dicts either way.
+    # The native ceiling (16 K headers) is far above the ~900 a Compal
+    # file produces, so there is no truncation risk on this path.
+    from .parsers.tvw_parser import _chip_headers, _decode_refdes
+    chips = _chip_headers(data)
     out: Dict[str, int] = {}
     for c in chips:
         rd = _decode_refdes(data, c["off"])

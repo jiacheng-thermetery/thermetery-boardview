@@ -20,10 +20,17 @@ or **(partial)** describe patterns observed but not exhaustively confirmed.
 ## 1. Coordinate system
 
 - All coordinates are signed 32-bit integers in **file units**.
-- 1 file unit ≈ 0.32 µm (verified: 50 file units ≈ 16 µm pin↔pad
-  matching tolerance after master-fp transform).
-- 1 mm ≈ 3,125 file units. 1 mil (0.0254 mm) ≈ 79 file units.
-- Typical motherboard span: ±1,000,000 file units (≈ 320 mm).
+- 1 file unit = 1 centi-mil (1/100,000 inch, 0.254 µm); 1 mm = 3,937
+  file units; 1 mil = 100 file units. Verified by measuring the Z490
+  VISION G component span (915,387 × 1,158,840 units → 232 × 294 mm),
+  which matches the 305 × 244 mm ATX outline with normal edge insets —
+  the earlier 0.32 µm / 3,125-per-mm figures quoted here would imply an
+  impossible 293 × 371 mm board.
+- Typical motherboard span: ±1,200,000 file units (≈ 300 mm).
+- Master-footprint pin coordinates use the same file unit. (The
+  *fallback body-size table* in `tvw_parser.py` is hand-authored in
+  mm × 1000 and converted with `_UNITS_PER_MM = 3.937` — there are no
+  size records in the file itself.)
 - All coords stored as `(Y, X)` on disk, NOT `(X, Y)`. Every reader
   must swap. Verified across pads, segments, and polylines.
 - Origin (0, 0) is anchored on a mounting hole (`MH1` on Gigabyte
@@ -139,7 +146,7 @@ The file's `rotation` enum is left-handed:
 ### Verification
 
 91.8% of 32,713 pins across Z490/B550/X570 match an actual pad
-within 50 file units (~16 µm) using the unified transform.
+within 50 file units (~12.7 µm) using the unified transform.
 
 ### Code
 
@@ -171,7 +178,7 @@ is resolved via shared endpoints with pads/segments.
 ```
 
 `net_id` references the net name table. Found by `find_tagged_polylines_in_gap`
-in `tvw_seg_27_unified_v3.py`.
+in `tvw_trace_scanners.py`.
 
 ### Polyline chains (X570-specific)
 
@@ -358,7 +365,7 @@ and rotations — these records are redundant for pin↔net mapping.
 | B550 AORUS PRO AC r1.0               | 5.69 MB | 42,769 |     7,071 |   42,189 |
 
 All three pass `tvw_poly_verify.py` (vertex sanity, no garbage
-records) and `tvw_phase3_test.py` (topology build + broken-net
+records) and `tools/tvw_phase3_test.py` (topology build + broken-net
 detection + point→net lookup) as of v4.
 
 ## 13. Tools
@@ -367,7 +374,7 @@ Reading/parsing:
 - `tvw_parser.py` — main parser, builds `BoardModel`
 - `tvw_master_fp.py` — master footprint cracker
 - `tvw_topology.py` — connectivity graph
-- `tvw_seg_27_unified_v3.py` — binary scanners (polylines, segments,
+- `tvw_trace_scanners.py` — binary scanners (polylines, segments,
   pad runs, polyline chains)
 
 Rendering / dispatch:
