@@ -118,8 +118,16 @@ def _layer_index(layer: str) -> int:
     return 1 if str(layer).upper() == "BOTTOM" else 0
 
 
+def _ext_format(path: Path) -> str:
+    """Format tag from a path. Directory-shaped boards (eM-Test .asc
+    sets, opened via the Android folder picker) have no suffix."""
+    if path.is_dir():
+        return "asc"
+    return _EXT_FORMAT.get(path.suffix.lower(), "?")
+
+
 def _detect_format(path: Path, model: Optional[BoardModel]) -> str:
-    fmt = _EXT_FORMAT.get(path.suffix.lower(), "?")
+    fmt = _ext_format(path)
     if fmt == "tvw" and model is not None:
         # The Compal/Lenovo decoder (tvw_compal.py:1049) names every
         # shape "_compal_<master>_<refdes>"; the Gigabyte decoder uses
@@ -177,7 +185,7 @@ def open_board(path: str, key: Optional[str] = None) -> str:
     except Exception as exc:  # never raise across the bridge
         fmt = "?"
         try:
-            fmt = _EXT_FORMAT.get(Path(path).suffix.lower(), "?")
+            fmt = _ext_format(Path(path))
         except Exception:
             pass
         return _fail("parse_error", f"{type(exc).__name__}: {exc}", fmt)
@@ -185,7 +193,7 @@ def open_board(path: str, key: Optional[str] = None) -> str:
 
 def _open_board(path: str, key: Optional[str]) -> str:
     p = Path(path)
-    fmt = _EXT_FORMAT.get(p.suffix.lower(), "?")
+    fmt = _ext_format(p)
 
     # ---- parse, mirroring viewer.py's _open_board_path ---------
     try:

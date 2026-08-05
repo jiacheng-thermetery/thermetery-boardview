@@ -70,6 +70,7 @@
   var elSearch    = document.getElementById("bv-search");
   var elSuggest   = document.getElementById("bv-suggest");
   var btnOpen   = document.getElementById("bv-btn-open");
+  var btnOpenDir = document.getElementById("bv-btn-opendir");
   var btnLayer  = document.getElementById("bv-btn-layer");
   var btnTraces = document.getElementById("bv-btn-traces");
   var btnFit    = document.getElementById("bv-btn-fit");
@@ -1461,6 +1462,19 @@
       elDevFile.click();
     }
   });
+
+  if (btnOpenDir) {
+    if (hasAndroid && window.Android.openFolderPicker) {
+      btnOpenDir.addEventListener("click", function () {
+        window.Android.openFolderPicker();
+      });
+    } else {
+      // Folder-shaped boards (eM-Test .asc sets) are opened via the SAF
+      // tree picker on Android; the desktop dev harness loads exported
+      // JSON instead, so the button has no meaning there.
+      btnOpenDir.style.display = "none";
+    }
+  }
 
   btnFit.addEventListener("click", function () {
     fitView();

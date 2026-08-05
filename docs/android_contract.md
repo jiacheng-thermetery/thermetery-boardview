@@ -125,10 +125,13 @@ bv.onError(text)    // toast/banner, auto-dismiss
 ## 4. Kotlin bridge: `window.Android` (shell injects via addJavascriptInterface)
 
 ```js
-Android.openFilePicker()  // SAF picker; shell parses; later calls bv.onBoard(...)
-Android.loadTraces()      // async; shell later calls bv.onTraces(...)
-Android.openKeyManager()  // launches KeyManagerActivity (per-format key screen)
-Android.log(msg)          // logcat passthrough (tag "BoardviewJS")
+Android.openFilePicker()   // SAF picker; shell parses; later calls bv.onBoard(...)
+Android.openFolderPicker() // SAF tree picker for folder-shaped boards
+                           // (eM-Test .asc sets); shell copies the *.asc
+                           // members to cache and parses the directory
+Android.loadTraces()       // async; shell later calls bv.onTraces(...)
+Android.openKeyManager()   // launches KeyManagerActivity (per-format key screen)
+Android.log(msg)           // logcat passthrough (tag "BoardviewJS")
 ```
 
 **Renderer dev-harness rule:** when `window.Android` is undefined (desktop
@@ -208,9 +211,12 @@ how the renderer is developed and tested without Android.
 Measurement tool, walker/diagnostics, .fz decrypted-text cache (disabled on
 Android — native RC6 makes it unnecessary), Play Store packaging, x86 32-bit.
 
-Also not supported: opening eM-Test Expert `.asc` sets from the picker.
-The format is a *directory* of sibling files, but the shell copies a
-single SAF stream to `cacheDir/boards/`, so the parser cannot find the
-siblings. `asc_parser.py` still ships in the APK (boardview.py imports
-it unconditionally); on-device support would need a folder picker +
-multi-file copy.
+eM-Test Expert `.asc` sets (directory-shaped boards) ARE supported, via
+the dedicated folder flow: the "Folder" toolbar button calls
+`Android.openFolderPicker()` (SAF `ACTION_OPEN_DOCUMENT_TREE`); the
+shell copies the tree's `*.asc` members (size/count-capped) to
+`cacheDir/boards/<folderName>/` and parses the cached directory — the
+dispatcher routes directory paths to the ASC parser. Picking a *single*
+`.asc` file (picker or "open with") shows a hint dialog that routes to
+the folder picker, since a single-document grant cannot read the
+sibling members.
