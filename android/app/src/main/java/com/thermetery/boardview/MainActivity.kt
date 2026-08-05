@@ -18,6 +18,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.documentfile.provider.DocumentFile
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -46,6 +47,13 @@ class MainActivity : ComponentActivity() {
 
         /** SAF cannot filter on extension; accept everything and let the parser decide. */
         private val PICKER_MIME_TYPES = arrayOf("*/*")
+
+        /** Per-member ceiling when copying an ICT .asc folder. Real member
+         *  files are tens of KB to ~1 MB; anything bigger is not a member. */
+        private const val MAX_ASC_MEMBER_BYTES = 32L * 1024 * 1024
+
+        /** Folder-copy ceiling — an eM-Test set is exactly five files. */
+        private const val MAX_ASC_MEMBERS = 64
     }
 
     private lateinit var webView: WebView
@@ -59,6 +67,14 @@ class MainActivity : ComponentActivity() {
     private val openDocument =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) handleIncomingUri(uri)
+        }
+
+    // eM-Test Expert .asc boards are a *directory* of sibling files
+    // (contract §6), so they need a tree grant — a single-document grant
+    // cannot read siblings.
+    private val openDocumentTree =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            if (uri != null) handleIncomingTree(uri)
         }
 
     // ---------------------------------------------------------------- setup
@@ -126,6 +142,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Called (on the UI thread) from BoardviewBridge.openFolderPicker. */
+    fun launchFolderPicker() {
+        try {
+            openDocumentTree.launch(null)
+        } catch (t: Throwable) {
+            Log.e(TAG, "Could not launch SAF tree picker", t)
+            postError("Could not open the folder picker: ${t.message}")
+        }
+    }
+
     /** Called (on the UI thread) from BoardviewBridge.openKeyManager. */
     fun launchKeyManager() {
         startActivity(Intent(this, KeyManagerActivity::class.java))
@@ -167,6 +193,14 @@ class MainActivity : ComponentActivity() {
 
     private fun handleIncomingUri(uri: Uri) {
         val displayName = displayNameFor(uri)
+        if (displayName.substringAfterLast('.', "").lowercase() == "asc") {
+            // A lone member of a directory-shaped eM-Test set: a
+            // single-document grant can't reach the sibling files, so
+            // parsing is guaranteed to fail. Explain and offer the
+            // folder picker instead.
+            runOnUiThread { showAscFolderHint(displayName) }
+            return
+        }
         postStatus("Parsing $displayName…")
         PythonRuntime.submit {
             val dest: File = try {
@@ -196,6 +230,85 @@ class MainActivity : ComponentActivity() {
                     // Known encrypted extensions were checked before parsing,
                     // even when no saved key was present.
                     triedRemembered = rememberedFormat != null,
+                    rememberFormat = null,
+                )
+            )
+        }
+    }
+
+    private fun showAscFolderHint(displayName: String) {
+        AlertDialog.Builder(this)
+            .setTitle("Pick the board folder")
+            .setMessage(
+                "$displayName is one member of an eM-Test Expert ICT set — " +
+                "the board is the whole folder (parts/pins/nails/format/nets " +
+                ".asc together). Pick the folder that contains it."
+            )
+            .setPositiveButton("Pick folder") { _, _ -> launchFolderPicker() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** SAF tree pick → copy the .asc members into the session cache and
+     *  parse the cached directory (the dispatcher routes directories to
+     *  the ASC parser). Mirrors handleIncomingUri's keep-for-the-session
+     *  contract — load_traces re-reads the path lazily. */
+    private fun handleIncomingTree(tree: Uri) {
+        val treeDoc = DocumentFile.fromTreeUri(this, tree)
+        if (treeDoc == null || !treeDoc.isDirectory) {
+            postError("Could not open the picked folder.")
+            return
+        }
+        val dirName = treeDoc.name?.takeIf { it.isNotBlank() } ?: "board"
+        postStatus("Copying $dirName…")
+        PythonRuntime.submit {
+            val dest: File = try {
+                val boardsDir = File(cacheDir, "boards").apply { mkdirs() }
+                val dir = File(boardsDir, sanitizeFileName(dirName))
+                // Fresh copy per pick so a re-pick after editing the
+                // folder never mixes stale members with new ones.
+                dir.deleteRecursively()
+                dir.mkdirs()
+                var copied = 0
+                for (child in treeDoc.listFiles()) {
+                    if (copied >= MAX_ASC_MEMBERS) break
+                    val name = child.name ?: continue
+                    if (!child.isFile) continue
+                    if (!name.lowercase().endsWith(".asc")) continue
+                    if (child.length() > MAX_ASC_MEMBER_BYTES) {
+                        Log.w(TAG, "Skipping oversized member $name (${child.length()} bytes)")
+                        continue
+                    }
+                    contentResolver.openInputStream(child.uri).use { input ->
+                        if (input == null) throw IOException("content stream unavailable for $name")
+                        File(dir, sanitizeFileName(name)).outputStream()
+                            .use { out -> input.copyTo(out) }
+                    }
+                    copied++
+                }
+                if (copied == 0) {
+                    postError(
+                        "$dirName contains no .asc files — pick the folder " +
+                        "holding the parts/pins/… .asc set."
+                    )
+                    postStatus("")
+                    return@submit
+                }
+                dir
+            } catch (t: Throwable) {
+                Log.e(TAG, "Folder copy failed for $tree", t)
+                postError("Could not read $dirName: ${t.message}")
+                postStatus("")
+                return@submit
+            }
+            parseBoard(
+                ParseAttempt(
+                    file = dest,
+                    displayName = dirName,
+                    key = null,
+                    promptsUsed = 0,
+                    // ASC sets are plaintext; no key slot applies.
+                    triedRemembered = true,
                     rememberFormat = null,
                 )
             )

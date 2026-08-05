@@ -103,8 +103,8 @@ android {
         applicationId = "com.thermetery.boardview"
         minSdk = 24
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.0.0"
+        versionCode = 5
+        versionName = "1.1.0"
 
         // Native kernels are prebuilt under src/main/jniLibs/<abi>/ for
         // exactly these two ABIs (16 KB-aligned, NDK r29).
@@ -178,4 +178,6 @@ chaquopy {
 dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-ktx:1.9.3")
+    // SAF tree traversal for folder-shaped boards (eM-Test .asc sets).
+    implementation("androidx.documentfile:documentfile:1.0.1")
 }

@@ -16,6 +16,13 @@ class BoardviewBridge(private val activity: MainActivity) {
     }
 
     @JavascriptInterface
+    fun openFolderPicker() {
+        // eM-Test Expert .asc boards are folders of sibling files; the
+        // tree grant lets the shell copy the whole set (contract §4/§6).
+        activity.runOnUiThread { activity.launchFolderPicker() }
+    }
+
+    @JavascriptInterface
     fun loadTraces() {
         activity.requestTraces()
     }
