@@ -866,6 +866,13 @@ class BoardCanvasCPU(CanvasCommon, tk.Canvas):
         # centi-mil TVW (or vice versa) must re-run the span heuristic,
         # or the measure tool reports 100x-off distances.
         self._units_per_mm_cache = None
+        # And any in-progress measurement: the endpoints are world coords
+        # in the OLD board's space, so re-scaling them against the new one
+        # reports a fabricated distance. Worst from the empty startup
+        # board, whose fallback bounds are a 1x1 unit box. Measure MODE is
+        # deliberately left alone — the user turned it on.
+        self._measure_pts = []
+        self._measure_hover = None
         self._compute_bounds()
         self._reorder_components()
         self.zoom = 1.0
@@ -1889,6 +1896,10 @@ if _GL_AVAILABLE:
             self._comp_count_by_layer = {}
             # And the memoized unit scale (mil vs centi-mil), same reason.
             self._units_per_mm_cache = None
+            # And any in-progress measurement, same reason as the CPU tier:
+            # stale endpoints would be re-scaled into a fabricated distance.
+            self._measure_pts = []
+            self._measure_hover = None
             self._compute_bounds()
             self._reorder_components()
             self.zoom = 1.0

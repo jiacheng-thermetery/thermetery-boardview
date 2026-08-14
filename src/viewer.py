@@ -56,12 +56,6 @@ def _last_dir() -> Optional[str]:
     return _load_config().get("last_dir")
 
 
-def _remember_dir(path: Path) -> None:
-    config = _load_config()
-    config["last_dir"] = str(path.parent if path.is_file() else path)
-    _save_config(config)
-
-
 def _remember_board_opened(board: Path) -> None:
     """Update last_dir and the recent list with one config read+write
     (opening a board previously loaded and rewrote the file twice)."""
@@ -101,9 +95,15 @@ def _clear_recent_persisted() -> None:
 # ----- Main app -----------------------------------------------------------
 
 class ViewerApp(tk.Tk):
-    def __init__(self, board: BoardModel, board_path: Optional[Path] = None):
+    def __init__(self, board: Optional[BoardModel] = None,
+                 board_path: Optional[Path] = None):
         super().__init__()
-        self.board = board
+        # Default to an empty model so the window can come up before any
+        # file has been chosen. Every consumer already renders a blank
+        # board correctly (BoardCanvas._compute_bounds falls back to a unit
+        # box, both info panels show their placeholder), which is what lets
+        # startup defer parsing until there is a GUI to report errors to.
+        self.board = board if board is not None else BoardModel()
         self.board_path = board_path
         self.title(self._title_for(board_path))
         self.geometry("1500x900")
@@ -413,7 +413,9 @@ class ViewerApp(tk.Tk):
 
     # ----- file open --------------------------------------------------------
 
-    def _menu_open_board(self) -> None:
+    def _menu_open_board(self, key: Optional[str] = None) -> None:
+        # `key` carries a --key given on the command line through to the
+        # first board the user picks; the menu and Ctrl+O pass nothing.
         path = filedialog.askopenfilename(
             title="Open boardview",
             filetypes=[
@@ -430,7 +432,7 @@ class ViewerApp(tk.Tk):
         )
         if not path:
             return
-        self._open_board_path(Path(path))
+        self._open_board_path(Path(path), key=key)
 
     def _open_board_path(self, path: Path, key=None) -> None:
         try:
@@ -968,6 +970,45 @@ class KeyManagerDialog(tk.Toplevel):
         self._set_status(fmt, "Cleared." if had else "Not set.", "neutral")
 
 
+def _startup_load(app: ViewerApp, board: Optional[str],
+                  key: Optional[str]) -> None:
+    """Open the first board once the window is up, or show the picker.
+
+    Everything here is wrapped: an exception raised inside an after_idle
+    callback is swallowed by Tk's report_callback_exception and never
+    reaches whoever called mainloop(), so in a windowed build the frozen
+    entry point's fatal-error dialog would not fire and the traceback
+    would land only in boardviewer.log. Startup used to run before
+    mainloop(), where a failure was impossible to miss; this keeps that
+    guarantee.
+    """
+    try:
+        if board is None:
+            app._menu_open_board(key=key)
+            return
+        path = Path(board)
+        # parse_board() blocks the event loop, and a big .tvw or a .pcb
+        # without its native fast path takes seconds. Say what is going
+        # on rather than leaving a painted but unresponsive window.
+        app.status.config(text=f"Loading {path.name}…")
+        app.update_idletasks()
+        app._open_board_path(path, key=key)
+    except Exception as exc:
+        import sys
+        import traceback
+
+        traceback.print_exc()
+        print(f"[viewer] startup failed: {exc}", file=sys.stderr)
+        messagebox.showerror(
+            "Could not open the boardview",
+            f"{board}\n\n{exc}\n\nThe viewer is still running — use "
+            f"File ▸ Open boardview… to try another file.",
+            parent=app)
+    finally:
+        # Clear the "Loading …" text whichever way we left.
+        app._update_status()
+
+
 def main() -> None:
     # Print a one-time perf warning if any of the native DLLs are missing.
     # Cheap (a couple of LoadLibrary attempts) and visible *before* the
@@ -987,40 +1028,22 @@ def main() -> None:
                          "via the FZ_KEY / XZZPCB_KEY environment variables.")
     args = ap.parse_args()
 
-    if args.board:
-        board_path: Optional[Path] = Path(args.board)
-    else:
-        if args.smoke_test:
-            ap.error("--smoke-test requires a board path")
-        root = tk.Tk()
-        root.withdraw()
-        try:
-            picked = filedialog.askopenfilename(
-                title="Open boardview",
-                filetypes=[
-                    ("Boardview", "*.cad *.brd *.brd2 *.bv *.tvw *.fz *.pcb"),
-                    ("All files", "*.*"),
-                ],
-                initialdir=_last_dir() or ".",
-            )
-        finally:
-            root.destroy()
-        if not picked:
-            return
-        board_path = Path(picked)
-        _remember_dir(board_path)
-
-    try:
-        board = parse_board(board_path, key=args.key)
-    except FZKeyError as exc:
-        import sys
-        print(f"[viewer] {exc}", file=sys.stderr)
-        print("[viewer] Supply it with --key, set FZ_KEY in the environment, "
-              "or open the file from the GUI to be prompted.", file=sys.stderr)
-        sys.exit(2)
-
-    app = ViewerApp(board, board_path=board_path)
     if args.smoke_test:
+        # Automation path: stays CLI-shaped. Parsing before the window
+        # exists is correct here because there is nobody to prompt — a
+        # missing key has to fail the run, not block on a modal dialog.
+        if not args.board:
+            ap.error("--smoke-test requires a board path")
+        board_path = Path(args.board)
+        try:
+            board = parse_board(board_path, key=args.key)
+        except FZKeyError as exc:
+            import sys
+            print(f"[viewer] {exc}", file=sys.stderr)
+            print("[viewer] Supply it with --key or set FZ_KEY in the "
+                  "environment.", file=sys.stderr)
+            sys.exit(2)
+        app = ViewerApp(board, board_path=board_path)
         app.update_idletasks()
         app.update()
         n_top = sum(1 for c in board.components.values() if c.layer == "TOP")
@@ -1038,10 +1061,22 @@ def main() -> None:
                 print(f"    - {w}")
         app.destroy()
         return
-    # Defer the warning dialog to after_idle so it appears once the
-    # main window has rendered — popping it before mainloop() makes
-    # it appear on top of an empty window, which looks broken.
-    app.after_idle(lambda: surface_model_warnings(board, parent=app))
+
+    # Interactive path: bring the main window up on an empty board first,
+    # then load through the very same code path as File -> Open. Parsing
+    # used to happen before any window existed, so an encrypted .fz could
+    # only report its missing key to stderr and exit(2) — invisible in a
+    # windowed build. Going through _open_board_path means the key prompt,
+    # the load-failure dialog, and the parser warnings all have a live
+    # window to parent onto, and a cancelled picker leaves the viewer open
+    # instead of quitting.
+    app = ViewerApp()
+    # A full update(), not just update_idletasks(): at the point an
+    # after_idle callback runs, Tk has not yet mapped the canvas or the
+    # status strip and has drawn no frame, so the deferred load would run
+    # behind a blank window. update() maps the children and paints.
+    app.update()
+    app.after_idle(lambda: _startup_load(app, args.board, args.key))
     app.mainloop()
 
 
