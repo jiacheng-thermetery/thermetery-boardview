@@ -85,6 +85,63 @@ jobs:
 
           Get-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "release\SHA256SUMS.txt")
 
+      # The build script self-tests its own staging tree. This launches the
+      # artifact a user actually downloads, extracted the way they extract
+      # it, so a fault in the archive step cannot reach a release.
+      - name: Launch the published portable ZIP
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          $zip = Join-Path $env:GITHUB_WORKSPACE `
+            "release\ThermeteryBoardviewer-$env:RELEASE_VERSION-windows-x64-portable.zip"
+          $out = Join-Path $env:RUNNER_TEMP "portable-check"
+          Remove-Item -LiteralPath $out -Recurse -Force -ErrorAction SilentlyContinue
+          Expand-Archive -LiteralPath $zip -DestinationPath $out -Force
+
+          $exe = Join-Path $out "ThermeteryBoardviewer.exe"
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+            throw "The portable ZIP does not extract ThermeteryBoardviewer.exe at its root."
+          }
+          foreach ($relative in @("_internal\python314.dll",
+                                  "_internal\VCRUNTIME140.dll",
+                                  "_internal\base_library.zip")) {
+            if (-not (Test-Path -LiteralPath (Join-Path $out $relative) -PathType Leaf)) {
+              throw "The portable ZIP is missing $relative."
+            }
+          }
+
+          # Entry names must use forward slashes (ZIP APPNOTE 4.4.17).
+          # Windows PowerShell 5.1 writes backslashes, which strict readers
+          # treat as part of the filename.
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            $bad = @($archive.Entries | Where-Object { $_.FullName.Contains([char]92) })
+            if ($bad.Count -gt 0) {
+              throw "$($bad.Count) ZIP entries use backslash separators, e.g. $($bad[0].FullName)"
+            }
+          } finally {
+            $archive.Dispose()
+          }
+
+          $diagnostics = Join-Path $env:RUNNER_TEMP "portable-diagnostics.json"
+          $env:BOARDVIEWER_SELF_TEST_OUTPUT = $diagnostics
+          $process = Start-Process -FilePath $exe -ArgumentList "--packaging-self-test" `
+            -WorkingDirectory $out -WindowStyle Hidden -PassThru
+          if (-not $process.WaitForExit(120000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw "The extracted portable build timed out during its self-test."
+          }
+          $process.Refresh()
+          if (-not (Test-Path -LiteralPath $diagnostics -PathType Leaf)) {
+            throw "The extracted portable build produced no diagnostics (exit $($process.ExitCode))."
+          }
+          $result = Get-Content -LiteralPath $diagnostics -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($process.ExitCode -ne 0 -or -not $result.ok) {
+            throw "The extracted portable build failed its self-test: $($result.error)"
+          }
+          Write-Host "Extracted portable build passed its self-test."
+
       - name: Upload Windows release bundle
         uses: actions/upload-artifact@v4
         with:
