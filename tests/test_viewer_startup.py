@@ -16,6 +16,7 @@ the suite stays headless-CI safe (Ubuntu runners have tkinter installed
 but no X server)."""
 
 import sys
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -223,6 +224,64 @@ class SmokeTestStartupTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as caught:
             _run_main(["board.fz", "--smoke-test"], parse_board=_raise)
         self.assertEqual(caught.exception.code, 2)
+
+
+class BackgroundParseTests(unittest.TestCase):
+    """_parse_in_background runs the parser on a worker thread so the event
+    loop keeps painting. These exercise the unbound method against a stub
+    `self`: with an instant parser the worker is already finished by the
+    time join() returns, so no progress dialog is built and no tk widget
+    is needed."""
+
+    class _Stub:
+        # 0 means "never wait" — the join still reaps an instant worker.
+        _LOADING_DIALOG_DELAY = 0.0
+
+    def _call(self, fake_parse):
+        with mock.patch.object(viewer, "parse_board", fake_parse):
+            return viewer.ViewerApp._parse_in_background(
+                self._Stub(), Path("board.tvw"), key="K")
+
+    def test_returns_the_parsed_board(self):
+        sentinel = BoardModel()
+        self.assertIs(self._call(lambda p, key=None: sentinel), sentinel)
+
+    def test_path_and_key_reach_the_parser(self):
+        seen = {}
+
+        def fake(path, key=None):
+            seen["path"], seen["key"] = path, key
+            return BoardModel()
+
+        self._call(fake)
+        self.assertEqual(seen, {"path": Path("board.tvw"), "key": "K"})
+
+    def test_fzkeyerror_survives_the_thread_boundary(self):
+        """The key prompt keys off the exception TYPE, so it has to be
+        re-raised as itself rather than wrapped."""
+        def fake(path, key=None):
+            raise FZKeyError("needs an FZKey")
+
+        with self.assertRaises(FZKeyError):
+            self._call(fake)
+
+    def test_other_errors_are_re_raised(self):
+        def fake(path, key=None):
+            raise RuntimeError("corrupt header")
+
+        with self.assertRaises(RuntimeError):
+            self._call(fake)
+
+    def test_parsing_happens_off_the_main_thread(self):
+        where = {}
+
+        def fake(path, key=None):
+            where["thread"] = threading.current_thread()
+            return BoardModel()
+
+        self._call(fake)
+        self.assertIsNot(where["thread"], threading.main_thread(),
+                         "the parse must not run on the tk thread")
 
 
 class EmptyBoardTests(unittest.TestCase):

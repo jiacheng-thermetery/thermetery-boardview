@@ -23,6 +23,7 @@ Usage:
 """
 
 import argparse
+import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -90,6 +91,55 @@ def _clear_recent_persisted() -> None:
     config = _load_config()
     config["recent"] = []
     _save_config(config)
+
+
+class _LoadingDialog(tk.Toplevel):
+    """Modal progress window shown while a board parses on a worker thread.
+
+    Its real job is to keep the Tk event loop running during the parse.
+    A large .tvw, or a .pcb without its native fast path, takes seconds
+    (see check_native_dlls for the numbers), and parsing inline froze the
+    window — Windows greys a frozen window and appends "Not Responding".
+    The grab also makes the load modal, which stops a second board being
+    opened on top of the first.
+    """
+
+    def __init__(self, parent: tk.Misc, name: str):
+        super().__init__(parent)
+        self.title("Opening boardview")
+        self.transient(parent)
+        self.resizable(False, False)
+        # The parse cannot be cancelled, so an X that does nothing would
+        # be worse than no X at all.
+        self.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        ttk.Label(self, text=f"Loading {name}", font=("Segoe UI", 10)).pack(
+            anchor="w", padx=16, pady=(16, 2))
+        ttk.Label(self, text="Large boards can take a few seconds.",
+                  foreground="#666").pack(anchor="w", padx=16)
+        self._bar = ttk.Progressbar(self, mode="indeterminate", length=340)
+        self._bar.pack(padx=16, pady=(10, 16))
+        self._bar.start(12)
+
+        # Same ordering as walker.py's _platform_picker: geometry first,
+        # then grab/lift. Grabbing before the window is positioned can
+        # flash it at (0,0), and Tk's default placement can land it
+        # off-screen — an invisible modal is unrecoverable.
+        parent.update_idletasks()
+        w, h = 380, 130
+        x = parent.winfo_rootx() + max(0, (parent.winfo_width() - w) // 2)
+        y = parent.winfo_rooty() + max(0, (parent.winfo_height() - h) // 3)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.grab_set()
+        self.lift()
+
+    def close(self) -> None:
+        try:
+            self._bar.stop()
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
 
 
 # ----- Main app -----------------------------------------------------------
@@ -434,9 +484,56 @@ class ViewerApp(tk.Tk):
             return
         self._open_board_path(Path(path), key=key)
 
+    # Boards under this parse in well below a frame; showing a modal for
+    # them would just flash. Anything slower gets the progress window.
+    _LOADING_DIALOG_DELAY = 0.15
+
+    def _parse_in_background(self, path: Path, key=None):
+        """`parse_board(path, key)` with the event loop kept alive.
+
+        Returns the BoardModel or re-raises whatever the parser raised, so
+        callers read exactly like the plain inline call they replaced —
+        including the FZKeyError the key prompt depends on.
+
+        Every Tk call stays on the main thread: the worker only writes to
+        `outcome`, and the main thread polls it from an after() callback.
+        The parsers are pure (no tkinter, no module-level mutable state),
+        which is what makes running them off-thread safe.
+        """
+        outcome: Dict[str, Any] = {}
+
+        def work() -> None:
+            try:
+                outcome["board"] = parse_board(path, key=key)
+            except BaseException as exc:  # re-raised on the main thread
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=work, name="parse-board", daemon=True)
+        worker.start()
+        # Give a fast board the chance to finish before anything is drawn.
+        worker.join(self._LOADING_DIALOG_DELAY)
+
+        if worker.is_alive():
+            dialog = _LoadingDialog(self, path.name)
+
+            def poll() -> None:
+                if worker.is_alive():
+                    self.after(50, poll)
+                else:
+                    dialog.close()
+
+            self.after(50, poll)
+            # Nested event loop: the window keeps painting and Windows
+            # never marks it unresponsive.
+            self.wait_window(dialog)
+
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["board"]
+
     def _open_board_path(self, path: Path, key=None) -> None:
         try:
-            board = parse_board(path, key=key)
+            board = self._parse_in_background(path, key=key)
         except FZKeyError as exc:
             # ASUS (RC6) .fz with a missing or bad key - prompt and retry.
             board = self._load_with_key_prompt(path, fmt="fz",
@@ -492,7 +589,10 @@ class ViewerApp(tk.Tk):
                 return None
             entered = entered.strip()
             try:
-                board = parse_board(path, key=entered)
+                # Decrypting is the slow half for an ASUS .fz without
+                # rc6_native (+6 s), so this retry needs the progress
+                # window just as much as the first attempt did.
+                board = self._parse_in_background(path, key=entered)
             except FZKeyError as exc:
                 prompt = f"That key did not work - {exc}" + nl + nl + ask
                 continue
