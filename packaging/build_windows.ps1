@@ -247,6 +247,49 @@ function Assert-PortableRuntime([string]$PayloadDir) {
     }
 }
 
+function Test-LtoSupported {
+    # `-Db_lto=true` is a hard failure, not a downgrade, on a GCC built
+    # --disable-lto: cc1 reports "LTO support has not been enabled in this
+    # configuration" and the whole release build stops. w64devkit's GCC 16.1
+    # is exactly such a toolchain. The measured win on these three
+    # single-file libraries is under 2%, so LTO is worth taking when it is
+    # there and never worth failing the build over.
+    #
+    # Only GCC is probed: meson's b_lto is not among cl.exe's base options,
+    # so on MSVC the flag is accepted and ignored.
+    $gcc = Get-Command gcc.exe -ErrorAction SilentlyContinue
+    if (-not $gcc) {
+        return $true
+    }
+    $probeDir = Join-Path $WorkRoot "lto-probe"
+    New-Item -ItemType Directory -Path $probeDir -Force | Out-Null
+    try {
+        $probeSource = Join-Path $probeDir "probe.c"
+        Set-Content -LiteralPath $probeSource -Encoding ascii `
+            -Value "int probe(void) { return 0; }"
+        # Start-Process rather than the call operator, because this probe is
+        # MEANT to fail sometimes. Windows PowerShell wraps a native
+        # command's stderr in a NativeCommandError, and under this script's
+        # $ErrorActionPreference = "Stop" that terminates the build -- the
+        # very failure this function exists to avoid. Redirection operators
+        # (2>&1, *>) do not help; they are what triggers the wrapping.
+        # Start-Process routes the child's streams to files without
+        # involving PowerShell's error stream at all.
+        $probe = Start-Process -FilePath $gcc.Source -PassThru -Wait -NoNewWindow `
+            -ArgumentList @("-flto", "-c",
+                            "-o", (Join-Path $probeDir "probe.o"),
+                            $probeSource) `
+            -RedirectStandardOutput (Join-Path $probeDir "probe.out") `
+            -RedirectStandardError (Join-Path $probeDir "probe.err")
+        return ($probe.ExitCode -eq 0)
+    } catch {
+        # An unusable probe is not evidence that LTO works.
+        return $false
+    } finally {
+        Remove-Item -LiteralPath $probeDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Assert-ReleasePayload([string]$PayloadDir) {
     Assert-PortableRuntime $PayloadDir
     $required = @(
@@ -541,9 +584,13 @@ try {
         "-m", "mesonbuild.mesonmain", "setup",
         $nativeBuild, $RepoRoot,
         "--buildtype=release",
-        "-Db_lto=true",
         "-Db_ndebug=true"
     )
+    if (Test-LtoSupported) {
+        $mesonArgs += "-Db_lto=true"
+    } else {
+        Write-Host "Toolchain has no LTO support -- building the native libraries without it."
+    }
     if (Test-Path -LiteralPath (Join-Path $nativeBuild "meson-private\coredata.dat")) {
         $mesonArgs = @("-m", "mesonbuild.mesonmain", "setup", "--reconfigure") + $mesonArgs[3..($mesonArgs.Count - 1)]
     }

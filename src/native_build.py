@@ -150,6 +150,9 @@ def _probe_gnu(path: str, environ: Mapping[str, str]) -> Optional[Compiler]:
         if ver.returncode == 0 and ver.stdout:
             version = ver.stdout.splitlines()[0].strip()
     except (OSError, subprocess.SubprocessError):
+        # Cosmetic only: the version string just makes the stamp key and the
+        # log line more legible. -dumpmachine already proved the compiler
+        # runs, so failing to get a banner is no reason to reject it.
         pass
     return Compiler(path=path, kind="gnu",
                     ident=f"{version} ({target})" if version else target)
@@ -354,6 +357,9 @@ def _unlink_quiet(path: Path) -> None:
     try:
         path.unlink()
     except OSError:
+        # Best effort cleanup of a temp or rejected artifact. It is already
+        # gone, or something else holds it; either way the caller's decision
+        # does not change and a failure here must not mask the real result.
         pass
 
 
@@ -388,6 +394,9 @@ def _write_stamp(path: Path, key: str, ok: bool, error: str = "") -> None:
         path.write_text(json.dumps({"key": key, "ok": ok, "error": error}),
                         encoding="utf-8")
     except OSError:
+        # The stamp is an optimisation, not state we depend on. Losing it
+        # costs a rebuild next launch (or a retry of a failure), which is
+        # strictly better than failing a build that already succeeded.
         pass
 
 
@@ -408,6 +417,11 @@ def _unload(lib) -> None:
         else:
             ctypes.CDLL(None).dlclose(ctypes.c_void_p(handle))
     except Exception:
+        # Deliberately broad: this is a courtesy unload on a library that
+        # has already been verified, and the platform surface here (windll,
+        # dlclose via the process handle) varies enough that an unexpected
+        # failure must not turn a good build into a failed one. Worst case
+        # the library stays mapped, exactly as it would have before.
         pass
 
 

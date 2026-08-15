@@ -138,6 +138,9 @@ class _LoadingDialog(tk.Toplevel):
             self._bar.stop()
             self.grab_release()
         except tk.TclError:
+            # The dialog can already be gone -- the parent was destroyed, or
+            # close() ran twice. Tearing down a torn-down widget is not an
+            # error worth surfacing; destroy() below is idempotent too.
             pass
         self.destroy()
 
@@ -503,9 +506,15 @@ class ViewerApp(tk.Tk):
         outcome: Dict[str, Any] = {}
 
         def work() -> None:
+            # BaseException on purpose, and it has to stay that way: this is
+            # a thread boundary, so anything not caught here dies with the
+            # worker, silently, and the main thread is left with an empty
+            # `outcome` and no idea why. Catching everything and re-raising
+            # it below turns the worker back into a plain function call.
+            # (concurrent.futures does the same thing for the same reason.)
             try:
                 outcome["board"] = parse_board(path, key=key)
-            except BaseException as exc:  # re-raised on the main thread
+            except BaseException as exc:  # noqa: BLE001 - re-raised below
                 outcome["error"] = exc
 
         worker = threading.Thread(target=work, name="parse-board", daemon=True)
@@ -529,6 +538,12 @@ class ViewerApp(tk.Tk):
 
         if "error" in outcome:
             raise outcome["error"]
+        if "board" not in outcome:
+            # wait_window() returned while the worker was still going, so the
+            # dialog was destroyed from outside -- which is what happens when
+            # the main window goes away mid-parse. Say so plainly rather than
+            # letting an empty `outcome` surface as a KeyError.
+            raise RuntimeError(f"loading {path.name} was interrupted")
         return outcome["board"]
 
     def _open_board_path(self, path: Path, key=None) -> None:

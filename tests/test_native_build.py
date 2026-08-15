@@ -10,8 +10,6 @@ The tests that need a real compiler skip themselves when none is found, so
 the file is safe on any CI image; the ubuntu-latest runner has gcc and does
 exercise the full round trip."""
 
-import os
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -20,7 +18,7 @@ from unittest import mock
 
 from src import native_build
 from src.native_build import (AUTOBUILD_ENV, CC_ENV, LIBRARY_NAMES,
-                              BuildReport, autobuild_enabled, detect_compiler,
+                              autobuild_enabled, detect_compiler,
                               ensure_native_libraries, gnu_flags, msvc_flags)
 
 REAL_SOURCES = Path(__file__).resolve().parent.parent / "src" / "parsers" / "native"
