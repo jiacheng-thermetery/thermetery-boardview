@@ -134,10 +134,13 @@ When viewing an inner copper layer, TOP/BOTTOM components render as
 faint ghost outlines so you keep spatial context without losing the
 layer you're inspecting.
 
-**Native library preflight** — on launch the viewer probes the three native
-fast-path shared libraries and prints a one-time stderr warning (with per-format
-slowdown and the meson build command) for any that are missing, so a fresh
-checkout that forgot to compile them is obvious before you open a board.
+**Native library autobuild** — on launch the viewer compiles any of the three
+native fast-path libraries that are missing, then probes them. A fresh checkout
+gets its fast paths on first run (~1 s once, then nothing), with no meson and no
+manual step; anything that still could not be built falls back to pure Python and
+is reported on stderr with the reason. Set `BOARDVIEW_NATIVE_AUTOBUILD=0` to
+disable it, or `BOARDVIEW_CC` to name the compiler to use. See
+[Building](#building).
 
 ## Renderer tiers
 
@@ -170,8 +173,23 @@ anything (you just wait longer):
 
 ### Building
 
-The project uses [Meson](https://mesonbuild.com/) to compile the C sources.
-Install Meson and a C compiler (gcc/clang), then:
+**You normally do not have to build these.** If a C compiler is installed, the
+viewer and walker compile whatever is missing on launch and cache the result in
+`src/parsers/native/` — one translation unit each, no meson, about a second in
+total, once per checkout. The compiler is looked for in this order:
+
+1. `BOARDVIEW_CC`, then `CC`
+2. `cc`, `gcc`, `clang` on `PATH`
+3. Windows only: the usual MinGW locations (`C:\msys64\ucrt64\bin`, …), then
+   Visual Studio's `cl.exe` via `vswhere` + `vcvarsall.bat`
+
+Nothing is ever downloaded or installed — the search only ever finds a compiler
+you already have. Set `BOARDVIEW_NATIVE_AUTOBUILD=0` to turn the whole thing off
+and go back to a warning. A library that was put there by meson or shipped in a
+release is never overwritten.
+
+Releases are still built with [Meson](https://mesonbuild.com/), and it remains
+the canonical build:
 
 ```bash
 pip install meson ninja                    # or: pip install -r requirements.txt
@@ -181,8 +199,7 @@ ninja -C build                            # compile (or: meson compile -C build)
 
 This produces the shared libraries in `build/parsers/` and copies them into
 `src/parsers/native/`. On Windows the output is `.dll`; on macOS `.dylib`;
-on Linux `.so`. The viewer/walker auto-detect the platform extension and
-warn at launch if any library is missing.
+on Linux `.so`.
 
 > **Note:** Decrypted plaintext (XZZPCB / ASUS FZ) is never written to disk —
 > caching proprietary file contents is an IP/leakage hazard.

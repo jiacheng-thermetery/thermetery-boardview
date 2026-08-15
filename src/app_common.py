@@ -46,12 +46,27 @@ def check_native_dlls(app: str = "viewer") -> None:
         ext = ".so"
         lib_prefix = "lib"
 
-    def _hint(name: str) -> str:
-        return (
-            f"meson compile -C build && cp build/parsers/{lib_prefix}{name}{ext} src/parsers/native/"
-        )
+    # Compile whatever is missing BEFORE probing for it -- never after, and
+    # never on a worker thread. Three separate facts each rule that out:
+    #   * the ctypes wrappers latch their first load result (tvw_native._LIB
+    #     becomes False, xzz_native._LOAD_ATTEMPTED True, fz_parser._NATIVE_RC6
+    #     False), so a library that appears after the first probe stays
+    #     invisible for the rest of the process;
+    #   * Windows keys LoadLibrary by base name, so reloading a replaced
+    #     tvw_native.dll hands back the module already mapped;
+    #   * Windows refuses to replace a mapped DLL at all, so a build must
+    #     never race a load.
+    # native_build returns a report rather than raising: an absent, wrong or
+    # broken compiler simply leaves `missing` populated below.
+    try:
+        from .native_build import ensure_native_libraries
+        report = ensure_native_libraries(
+            log=lambda message: print(f"[{app}] {message}", file=sys.stderr))
+    except Exception as exc:  # pragma: no cover - defence in depth
+        report = None
+        print(f"[{app}] native auto-build unavailable: {exc}", file=sys.stderr)
 
-    missing: List[Tuple[str, str, str]] = []  # (name, slowdown, build hint)
+    missing: List[Tuple[str, str]] = []  # (library filename, slowdown)
 
     # tvw_native -- exposes _load() returning the lib (or None on miss).
     try:
@@ -60,13 +75,11 @@ def check_native_dlls(app: str = "viewer") -> None:
             missing.append((
                 f"{lib_prefix}tvw_native{ext}",
                 "+1-2 s per .tvw cold load (slower pad/net/poly scans)",
-                _hint("tvw_native"),
             ))
     except Exception:
         missing.append((
             f"{lib_prefix}tvw_native{ext}",
             "+1-2 s per .tvw cold load",
-            _hint("tvw_native"),
         ))
 
     # xzz_native -- has a clean public available() helper.
@@ -76,13 +89,11 @@ def check_native_dlls(app: str = "viewer") -> None:
             missing.append((
                 f"{lib_prefix}xzz_native{ext}",
                 "+30-60 s per .pcb (XZZPCB) cold load: DES in pure Python",
-                _hint("xzz_native"),
             ))
     except Exception:
         missing.append((
             f"{lib_prefix}xzz_native{ext}",
             "+30-60 s per .pcb (XZZPCB) cold load",
-            _hint("xzz_native"),
         ))
 
     # rc6_native -- private helper inside fz_parser.py. Only matters for
@@ -93,13 +104,11 @@ def check_native_dlls(app: str = "viewer") -> None:
             missing.append((
                 f"{lib_prefix}rc6_native{ext}",
                 "+6 s per ASUS .fz cold load (ASRock .fz unaffected)",
-                _hint("rc6_native"),
             ))
     except Exception:
         missing.append((
             f"{lib_prefix}rc6_native{ext}",
             "+6 s per ASUS .fz cold load",
-            _hint("rc6_native"),
         ))
 
     if not missing:
@@ -109,9 +118,14 @@ def check_native_dlls(app: str = "viewer") -> None:
         "loads will be much slower:",
         file=sys.stderr,
     )
-    for name, slowdown, hint in missing:
+    for name, slowdown in missing:
         print(f"  - {name}: {slowdown}", file=sys.stderr)
-        print(f"      build: {hint}", file=sys.stderr)
+    # Why the automatic build did not supply them, and what to do about it.
+    # The meson command is still the canonical build, so it stays as the
+    # last line of advice -- it is just no longer the only thing we tell a
+    # user who already has a perfectly good compiler installed.
+    for line in (report.advice() if report is not None else ()):
+        print(f"[{app}] {line}", file=sys.stderr)
     print(
         f"[{app}] These libraries live in src/parsers/native/ next to the "
         "matching .py wrappers. The app will still run — this is a perf "
