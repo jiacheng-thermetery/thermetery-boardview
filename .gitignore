@@ -81,6 +81,11 @@ Thumbs.db
 *.dll
 *.dylib
 *.so
+# Sidecars written by src/native_build.py recording what it compiled, so a
+# rebuild triggers on a source or toolchain change. Local build state, and
+# their absence is meaningful: a library with no stamp was produced by meson
+# or shipped in a release, and the auto-build never overwrites one.
+*.build-stamp
 
 # Python
 __pycache__/

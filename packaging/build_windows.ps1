@@ -176,7 +176,122 @@ function Assert-NativeCompiler {
     }
 }
 
+function New-PortableArchive {
+    <#
+        Write the portable ZIP deterministically, whichever PowerShell runs
+        this script.
+
+        Two reasons this is not Compress-Archive:
+
+        1. Entry separators. Windows PowerShell 5.1's Compress-Archive AND
+           .NET Framework's ZipFile.CreateFromDirectory both write BACKSLASH
+           separators, which the ZIP spec (APPNOTE 4.4.17) forbids. Explorer
+           tolerates them; strict readers (Python's zipfile, most non-Windows
+           tools) do not - they treat the backslash as part of the filename
+           and produce one flat directory of files literally called
+           "_internal\python314.dll". CI runs pwsh, whose .NET 5+ writes
+           forward slashes, so only local builds were affected - and
+           build_windows.cmd invokes powershell.exe. Building the entries by
+           hand makes both editions agree.
+
+        2. Layout. The archive holds the payload CONTENTS, not the staging
+           folder. Explorer's "Extract All" already creates a folder named
+           after the ZIP, so an inner ThermeteryBoardviewer\ folder produced
+           "...-portable\ThermeteryBoardviewer\" - the redundant nesting that
+           invites users to flatten the tree by hand and strand the .exe
+           without _internal beside it.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceDir,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    Add-Type -AssemblyName System.IO.Compression | Out-Null
+    Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+
+    $root = [IO.Path]::GetFullPath($SourceDir).TrimEnd([char]92)
+    $archive = [IO.Compression.ZipFile]::Open($Destination, "Create")
+    try {
+        $files = Get-ChildItem -LiteralPath $root -Recurse -File -Force |
+            Sort-Object FullName
+        foreach ($file in $files) {
+            $relative = $file.FullName.Substring($root.Length + 1).Replace(
+                [char]92, [char]47)
+            [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $archive, $file.FullName, $relative,
+                [IO.Compression.CompressionLevel]::Optimal)
+        }
+    } finally {
+        $archive.Dispose()
+    }
+}
+
+function Assert-PortableRuntime([string]$PayloadDir) {
+    # The PyInstaller bootloader dies before a single line of Python runs if
+    # any of these is absent, and it reports only "Failed to load Python DLL
+    # ... The specified module could not be found" - so the frozen self-test
+    # can never catch it. A file manifest is the only automated guard.
+    $runtime = @(
+        "ThermeteryBoardviewer.exe",
+        "_internal\python314.dll",
+        "_internal\VCRUNTIME140.dll",
+        "_internal\base_library.zip",
+        "_internal\src\parsers\native\tvw_native.dll",
+        "_internal\src\parsers\native\xzz_native.dll",
+        "_internal\src\parsers\native\rc6_native.dll"
+    )
+    foreach ($relative in $runtime) {
+        $path = Join-Path $PayloadDir $relative
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Frozen runtime is incomplete: $path"
+        }
+    }
+}
+
+function Test-LtoSupported {
+    # `-Db_lto=true` is a hard failure, not a downgrade, on a GCC built
+    # --disable-lto: cc1 reports "LTO support has not been enabled in this
+    # configuration" and the whole release build stops. w64devkit's GCC 16.1
+    # is exactly such a toolchain. The measured win on these three
+    # single-file libraries is under 2%, so LTO is worth taking when it is
+    # there and never worth failing the build over.
+    #
+    # Only GCC is probed: meson's b_lto is not among cl.exe's base options,
+    # so on MSVC the flag is accepted and ignored.
+    $gcc = Get-Command gcc.exe -ErrorAction SilentlyContinue
+    if (-not $gcc) {
+        return $true
+    }
+    $probeDir = Join-Path $WorkRoot "lto-probe"
+    New-Item -ItemType Directory -Path $probeDir -Force | Out-Null
+    try {
+        $probeSource = Join-Path $probeDir "probe.c"
+        Set-Content -LiteralPath $probeSource -Encoding ascii `
+            -Value "int probe(void) { return 0; }"
+        # Start-Process rather than the call operator, because this probe is
+        # MEANT to fail sometimes. Windows PowerShell wraps a native
+        # command's stderr in a NativeCommandError, and under this script's
+        # $ErrorActionPreference = "Stop" that terminates the build -- the
+        # very failure this function exists to avoid. Redirection operators
+        # (2>&1, *>) do not help; they are what triggers the wrapping.
+        # Start-Process routes the child's streams to files without
+        # involving PowerShell's error stream at all.
+        $probe = Start-Process -FilePath $gcc.Source -PassThru -Wait -NoNewWindow `
+            -ArgumentList @("-flto", "-c",
+                            "-o", (Join-Path $probeDir "probe.o"),
+                            $probeSource) `
+            -RedirectStandardOutput (Join-Path $probeDir "probe.out") `
+            -RedirectStandardError (Join-Path $probeDir "probe.err")
+        return ($probe.ExitCode -eq 0)
+    } catch {
+        # An unusable probe is not evidence that LTO works.
+        return $false
+    } finally {
+        Remove-Item -LiteralPath $probeDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Assert-ReleasePayload([string]$PayloadDir) {
+    Assert-PortableRuntime $PayloadDir
     $required = @(
         (Join-Path $PayloadDir "ThermeteryBoardviewer.exe"),
         (Join-Path $PayloadDir "_internal\src\parsers\native\tvw_native.dll"),
@@ -469,9 +584,13 @@ try {
         "-m", "mesonbuild.mesonmain", "setup",
         $nativeBuild, $RepoRoot,
         "--buildtype=release",
-        "-Db_lto=true",
         "-Db_ndebug=true"
     )
+    if (Test-LtoSupported) {
+        $mesonArgs += "-Db_lto=true"
+    } else {
+        Write-Host "Toolchain has no LTO support -- building the native libraries without it."
+    }
     if (Test-Path -LiteralPath (Join-Path $nativeBuild "meson-private\coredata.dat")) {
         $mesonArgs = @("-m", "mesonbuild.mesonmain", "setup", "--reconfigure") + $mesonArgs[3..($mesonArgs.Count - 1)]
     }
@@ -564,10 +683,35 @@ try {
 
     $portableZip = Join-Path $OutputDir "ThermeteryBoardviewer-$Version-windows-x64-portable.zip"
     Remove-Item -LiteralPath $portableZip -Force -ErrorAction SilentlyContinue
-    Compress-Archive -Path $portablePayload -DestinationPath $portableZip -CompressionLevel Optimal
+    New-PortableArchive -SourceDir $portablePayload -Destination $portableZip
     if (-not (Test-Path -LiteralPath $portableZip -PathType Leaf)) {
         throw "Portable archive was not created: $portableZip"
     }
+
+    # Everything above this point tested the staging tree, which no user ever
+    # runs. Extract the archive that actually ships and launch THAT, so a
+    # fault introduced by the archive step - a dropped file, a mangled entry
+    # name, an unexpected layout - fails the build instead of the customer.
+    Write-Step "Verifying the shipped portable archive"
+    $verifyRoot = Join-Path $WorkRoot "portable-verify"
+    Remove-SafeDirectory $verifyRoot "portable verification"
+    New-Item -ItemType Directory -Path $verifyRoot -Force | Out-Null
+    Expand-Archive -LiteralPath $portableZip -DestinationPath $verifyRoot -Force
+    $extractedExe = Join-Path $verifyRoot "ThermeteryBoardviewer.exe"
+    if (-not (Test-Path -LiteralPath $extractedExe -PathType Leaf)) {
+        throw ("The portable archive does not extract ThermeteryBoardviewer.exe " +
+               "at its root: $portableZip")
+    }
+    $stagedCount = (Get-ChildItem -LiteralPath $portablePayload -Recurse -File -Force).Count
+    $extractedCount = (Get-ChildItem -LiteralPath $verifyRoot -Recurse -File -Force).Count
+    if ($extractedCount -ne $stagedCount) {
+        throw ("The portable archive round-trips $extractedCount files but the " +
+               "payload has $stagedCount.")
+    }
+    Assert-PortableRuntime $verifyRoot
+    Invoke-FrozenSelfTest -PayloadDir $verifyRoot -ExpectedPortable $true `
+        -Label "extracted portable"
+    Remove-SafeDirectory $verifyRoot "portable verification"
 
     $artifacts = @($portableZip)
     if (-not $SkipInstaller) {

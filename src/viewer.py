@@ -23,6 +23,7 @@ Usage:
 """
 
 import argparse
+import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -54,12 +55,6 @@ def _save_config(config: Dict[str, Any]) -> None:
 
 def _last_dir() -> Optional[str]:
     return _load_config().get("last_dir")
-
-
-def _remember_dir(path: Path) -> None:
-    config = _load_config()
-    config["last_dir"] = str(path.parent if path.is_file() else path)
-    _save_config(config)
 
 
 def _remember_board_opened(board: Path) -> None:
@@ -98,12 +93,70 @@ def _clear_recent_persisted() -> None:
     _save_config(config)
 
 
+class _LoadingDialog(tk.Toplevel):
+    """Modal progress window shown while a board parses on a worker thread.
+
+    Its real job is to keep the Tk event loop running during the parse.
+    A large .tvw, or a .pcb without its native fast path, takes seconds
+    (see check_native_dlls for the numbers), and parsing inline froze the
+    window — Windows greys a frozen window and appends "Not Responding".
+    The grab also makes the load modal, which stops a second board being
+    opened on top of the first.
+    """
+
+    def __init__(self, parent: tk.Misc, name: str):
+        super().__init__(parent)
+        self.title("Opening boardview")
+        self.transient(parent)
+        self.resizable(False, False)
+        # The parse cannot be cancelled, so an X that does nothing would
+        # be worse than no X at all.
+        self.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        ttk.Label(self, text=f"Loading {name}", font=("Segoe UI", 10)).pack(
+            anchor="w", padx=16, pady=(16, 2))
+        ttk.Label(self, text="Large boards can take a few seconds.",
+                  foreground="#666").pack(anchor="w", padx=16)
+        self._bar = ttk.Progressbar(self, mode="indeterminate", length=340)
+        self._bar.pack(padx=16, pady=(10, 16))
+        self._bar.start(12)
+
+        # Same ordering as walker.py's _platform_picker: geometry first,
+        # then grab/lift. Grabbing before the window is positioned can
+        # flash it at (0,0), and Tk's default placement can land it
+        # off-screen — an invisible modal is unrecoverable.
+        parent.update_idletasks()
+        w, h = 380, 130
+        x = parent.winfo_rootx() + max(0, (parent.winfo_width() - w) // 2)
+        y = parent.winfo_rooty() + max(0, (parent.winfo_height() - h) // 3)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.grab_set()
+        self.lift()
+
+    def close(self) -> None:
+        try:
+            self._bar.stop()
+            self.grab_release()
+        except tk.TclError:
+            # The dialog can already be gone -- the parent was destroyed, or
+            # close() ran twice. Tearing down a torn-down widget is not an
+            # error worth surfacing; destroy() below is idempotent too.
+            pass
+        self.destroy()
+
+
 # ----- Main app -----------------------------------------------------------
 
 class ViewerApp(tk.Tk):
-    def __init__(self, board: BoardModel, board_path: Optional[Path] = None):
+    def __init__(self, board: Optional[BoardModel] = None,
+                 board_path: Optional[Path] = None):
         super().__init__()
-        self.board = board
+        # Default to an empty model so the window can come up before any
+        # file has been chosen. Every consumer already renders a blank
+        # board correctly (BoardCanvas._compute_bounds falls back to a unit
+        # box, both info panels show their placeholder), which is what lets
+        # startup defer parsing until there is a GUI to report errors to.
+        self.board = board if board is not None else BoardModel()
         self.board_path = board_path
         self.title(self._title_for(board_path))
         self.geometry("1500x900")
@@ -413,7 +466,9 @@ class ViewerApp(tk.Tk):
 
     # ----- file open --------------------------------------------------------
 
-    def _menu_open_board(self) -> None:
+    def _menu_open_board(self, key: Optional[str] = None) -> None:
+        # `key` carries a --key given on the command line through to the
+        # first board the user picks; the menu and Ctrl+O pass nothing.
         path = filedialog.askopenfilename(
             title="Open boardview",
             filetypes=[
@@ -430,11 +485,70 @@ class ViewerApp(tk.Tk):
         )
         if not path:
             return
-        self._open_board_path(Path(path))
+        self._open_board_path(Path(path), key=key)
+
+    # Boards under this parse in well below a frame; showing a modal for
+    # them would just flash. Anything slower gets the progress window.
+    _LOADING_DIALOG_DELAY = 0.15
+
+    def _parse_in_background(self, path: Path, key=None):
+        """`parse_board(path, key)` with the event loop kept alive.
+
+        Returns the BoardModel or re-raises whatever the parser raised, so
+        callers read exactly like the plain inline call they replaced —
+        including the FZKeyError the key prompt depends on.
+
+        Every Tk call stays on the main thread: the worker only writes to
+        `outcome`, and the main thread polls it from an after() callback.
+        The parsers are pure (no tkinter, no module-level mutable state),
+        which is what makes running them off-thread safe.
+        """
+        outcome: Dict[str, Any] = {}
+
+        def work() -> None:
+            # BaseException on purpose, and it has to stay that way: this is
+            # a thread boundary, so anything not caught here dies with the
+            # worker, silently, and the main thread is left with an empty
+            # `outcome` and no idea why. Catching everything and re-raising
+            # it below turns the worker back into a plain function call.
+            # (concurrent.futures does the same thing for the same reason.)
+            try:
+                outcome["board"] = parse_board(path, key=key)
+            except BaseException as exc:  # noqa: BLE001 - re-raised below
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=work, name="parse-board", daemon=True)
+        worker.start()
+        # Give a fast board the chance to finish before anything is drawn.
+        worker.join(self._LOADING_DIALOG_DELAY)
+
+        if worker.is_alive():
+            dialog = _LoadingDialog(self, path.name)
+
+            def poll() -> None:
+                if worker.is_alive():
+                    self.after(50, poll)
+                else:
+                    dialog.close()
+
+            self.after(50, poll)
+            # Nested event loop: the window keeps painting and Windows
+            # never marks it unresponsive.
+            self.wait_window(dialog)
+
+        if "error" in outcome:
+            raise outcome["error"]
+        if "board" not in outcome:
+            # wait_window() returned while the worker was still going, so the
+            # dialog was destroyed from outside -- which is what happens when
+            # the main window goes away mid-parse. Say so plainly rather than
+            # letting an empty `outcome` surface as a KeyError.
+            raise RuntimeError(f"loading {path.name} was interrupted")
+        return outcome["board"]
 
     def _open_board_path(self, path: Path, key=None) -> None:
         try:
-            board = parse_board(path, key=key)
+            board = self._parse_in_background(path, key=key)
         except FZKeyError as exc:
             # ASUS (RC6) .fz with a missing or bad key - prompt and retry.
             board = self._load_with_key_prompt(path, fmt="fz",
@@ -490,7 +604,10 @@ class ViewerApp(tk.Tk):
                 return None
             entered = entered.strip()
             try:
-                board = parse_board(path, key=entered)
+                # Decrypting is the slow half for an ASUS .fz without
+                # rc6_native (+6 s), so this retry needs the progress
+                # window just as much as the first attempt did.
+                board = self._parse_in_background(path, key=entered)
             except FZKeyError as exc:
                 prompt = f"That key did not work - {exc}" + nl + nl + ask
                 continue
@@ -968,6 +1085,45 @@ class KeyManagerDialog(tk.Toplevel):
         self._set_status(fmt, "Cleared." if had else "Not set.", "neutral")
 
 
+def _startup_load(app: ViewerApp, board: Optional[str],
+                  key: Optional[str]) -> None:
+    """Open the first board once the window is up, or show the picker.
+
+    Everything here is wrapped: an exception raised inside an after_idle
+    callback is swallowed by Tk's report_callback_exception and never
+    reaches whoever called mainloop(), so in a windowed build the frozen
+    entry point's fatal-error dialog would not fire and the traceback
+    would land only in boardviewer.log. Startup used to run before
+    mainloop(), where a failure was impossible to miss; this keeps that
+    guarantee.
+    """
+    try:
+        if board is None:
+            app._menu_open_board(key=key)
+            return
+        path = Path(board)
+        # parse_board() blocks the event loop, and a big .tvw or a .pcb
+        # without its native fast path takes seconds. Say what is going
+        # on rather than leaving a painted but unresponsive window.
+        app.status.config(text=f"Loading {path.name}…")
+        app.update_idletasks()
+        app._open_board_path(path, key=key)
+    except Exception as exc:
+        import sys
+        import traceback
+
+        traceback.print_exc()
+        print(f"[viewer] startup failed: {exc}", file=sys.stderr)
+        messagebox.showerror(
+            "Could not open the boardview",
+            f"{board}\n\n{exc}\n\nThe viewer is still running — use "
+            f"File ▸ Open boardview… to try another file.",
+            parent=app)
+    finally:
+        # Clear the "Loading …" text whichever way we left.
+        app._update_status()
+
+
 def main() -> None:
     # Print a one-time perf warning if any of the native DLLs are missing.
     # Cheap (a couple of LoadLibrary attempts) and visible *before* the
@@ -987,40 +1143,22 @@ def main() -> None:
                          "via the FZ_KEY / XZZPCB_KEY environment variables.")
     args = ap.parse_args()
 
-    if args.board:
-        board_path: Optional[Path] = Path(args.board)
-    else:
-        if args.smoke_test:
-            ap.error("--smoke-test requires a board path")
-        root = tk.Tk()
-        root.withdraw()
-        try:
-            picked = filedialog.askopenfilename(
-                title="Open boardview",
-                filetypes=[
-                    ("Boardview", "*.cad *.brd *.brd2 *.bv *.tvw *.fz *.pcb"),
-                    ("All files", "*.*"),
-                ],
-                initialdir=_last_dir() or ".",
-            )
-        finally:
-            root.destroy()
-        if not picked:
-            return
-        board_path = Path(picked)
-        _remember_dir(board_path)
-
-    try:
-        board = parse_board(board_path, key=args.key)
-    except FZKeyError as exc:
-        import sys
-        print(f"[viewer] {exc}", file=sys.stderr)
-        print("[viewer] Supply it with --key, set FZ_KEY in the environment, "
-              "or open the file from the GUI to be prompted.", file=sys.stderr)
-        sys.exit(2)
-
-    app = ViewerApp(board, board_path=board_path)
     if args.smoke_test:
+        # Automation path: stays CLI-shaped. Parsing before the window
+        # exists is correct here because there is nobody to prompt — a
+        # missing key has to fail the run, not block on a modal dialog.
+        if not args.board:
+            ap.error("--smoke-test requires a board path")
+        board_path = Path(args.board)
+        try:
+            board = parse_board(board_path, key=args.key)
+        except FZKeyError as exc:
+            import sys
+            print(f"[viewer] {exc}", file=sys.stderr)
+            print("[viewer] Supply it with --key or set FZ_KEY in the "
+                  "environment.", file=sys.stderr)
+            sys.exit(2)
+        app = ViewerApp(board, board_path=board_path)
         app.update_idletasks()
         app.update()
         n_top = sum(1 for c in board.components.values() if c.layer == "TOP")
@@ -1038,10 +1176,22 @@ def main() -> None:
                 print(f"    - {w}")
         app.destroy()
         return
-    # Defer the warning dialog to after_idle so it appears once the
-    # main window has rendered — popping it before mainloop() makes
-    # it appear on top of an empty window, which looks broken.
-    app.after_idle(lambda: surface_model_warnings(board, parent=app))
+
+    # Interactive path: bring the main window up on an empty board first,
+    # then load through the very same code path as File -> Open. Parsing
+    # used to happen before any window existed, so an encrypted .fz could
+    # only report its missing key to stderr and exit(2) — invisible in a
+    # windowed build. Going through _open_board_path means the key prompt,
+    # the load-failure dialog, and the parser warnings all have a live
+    # window to parent onto, and a cancelled picker leaves the viewer open
+    # instead of quitting.
+    app = ViewerApp()
+    # A full update(), not just update_idletasks(): at the point an
+    # after_idle callback runs, Tk has not yet mapped the canvas or the
+    # status strip and has drawn no frame, so the deferred load would run
+    # behind a blank window. update() maps the children and paints.
+    app.update()
+    app.after_idle(lambda: _startup_load(app, args.board, args.key))
     app.mainloop()
 
 

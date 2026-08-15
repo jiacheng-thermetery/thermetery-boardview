@@ -1,5 +1,11 @@
 Thermetery Boardviewer - portable Windows x64 edition
 
+Extract the ENTIRE ZIP first, then run ThermeteryBoardviewer.exe from the
+extracted folder. Copying only ThermeteryBoardviewer.exe out of the ZIP
+fails with "Failed to load Python DLL ... python314.dll": the _internal
+directory sitting next to the .exe IS the Python runtime, and the program
+cannot start without it.
+
 Keep this whole directory together and run ThermeteryBoardviewer.exe.
 The _internal directory and portable.flag are required parts of the app.
 

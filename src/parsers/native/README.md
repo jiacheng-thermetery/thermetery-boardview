@@ -34,11 +34,16 @@ about the slowdown at app startup).
 
 ## Build
 
+Usually nothing: `src/native_build.py` compiles whatever is missing on launch
+(see the repo README's *Building* section). The two manual routes below stay
+available, and a library either of them produces is left alone by the
+autobuild — it only ever replaces one it built itself.
+
 ```bash
 meson setup build && meson compile -C build
 ```
 
-or by hand (Windows, MSYS2 UCRT64):
+or by hand (Windows, MSYS2 UCRT64) — the same flags the autobuild uses:
 
 ```bash
 gcc -O3 -shared -static-libgcc -Wl,--strip-all -o tvw_native.dll tvw_native.c
