@@ -81,7 +81,7 @@ targets:
             UTTypeConformsTo: [public.data]
             UTTypeTagSpecification: {public.filename-extension: [asc]}
     postBuildScripts:
-      - name: Stage Python sources
+      - name: Stage + embed Python
         script: "\"$PROJECT_DIR/stage_python.sh\"\n"
         shell: /bin/bash
         basedOnDependencyAnalysis: false
@@ -91,12 +91,5 @@ targets:
         basedOnDependencyAnalysis: false
       - name: Build native kernels
         script: "\"$PROJECT_DIR/build_kernels.sh\"\n"
-        shell: /bin/bash
-        basedOnDependencyAnalysis: false
-      - name: Process Python libraries
-        script: |
-          set -e
-          source "$PROJECT_DIR/vendor/Python.xcframework/build/utils.sh"
-          install_python vendor/Python.xcframework app_packages
         shell: /bin/bash
         basedOnDependencyAnalysis: false
