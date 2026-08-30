@@ -17,6 +17,22 @@ class RuntimePathTests(unittest.TestCase):
             self.assertIsNone(runtime_paths.managed_data_dir())
             self.assertEqual(runtime_paths.private_dir(), Path("private"))
 
+    def test_native_lib_names_per_platform(self):
+        # iOS reports sys.platform == "ios" (PEP 730) and uses Mach-O
+        # dylibs like macOS; everything else non-Windows stays ".so".
+        cases = {
+            "win32": ["tvw_native.dll", "libtvw_native.dll"],
+            "darwin": ["tvw_native.dylib", "libtvw_native.dylib"],
+            "ios": ["tvw_native.dylib", "libtvw_native.dylib"],
+            "linux": ["tvw_native.so", "libtvw_native.so"],
+        }
+        for platform, expected in cases.items():
+            with mock.patch.object(runtime_paths.sys, "platform", platform):
+                self.assertEqual(
+                    runtime_paths.native_lib_names("tvw_native"), expected,
+                    f"sys.platform={platform}",
+                )
+
     def test_explicit_data_root_has_precedence(self):
         # Platform-neutral absolute path: "C:/..." is not absolute on
         # POSIX (managed_data_dir would CWD-resolve it), which made this

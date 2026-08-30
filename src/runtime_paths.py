@@ -140,7 +140,9 @@ def native_lib_names(base_name: str) -> List[str]:
     """
     if sys.platform.startswith("win"):
         suffix = ".dll"
-    elif sys.platform == "darwin":
+    elif sys.platform in ("darwin", "ios"):
+        # CPython on iOS reports sys.platform == "ios" (PEP 730); Mach-O
+        # dylibs are the shared-library format there just like on macOS.
         suffix = ".dylib"
     else:
         suffix = ".so"
