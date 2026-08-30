@@ -222,6 +222,10 @@ final class KeyManagerViewController: UIViewController {
     @objc private func saveTapped(_ sender: UIButton) {
         let slot = slotFor(tag: sender.tag)
         let text = slot.input.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty {
+            toast("Nothing to save — paste or load a key first.")
+            return
+        }
         validate(slot) { [weak self] status in
             guard let self else { return }
             guard status == "valid" || status == "unverified" else {

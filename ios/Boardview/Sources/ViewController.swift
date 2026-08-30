@@ -383,8 +383,8 @@ final class ViewController: UIViewController {
             field.autocapitalizationType = .none
             field.spellCheckingType = .no
         }
-        let submit: (Bool) -> Void = { remember in
-            let entered = (alert.textFields?.first?.text ?? "")
+        let submit: (Bool) -> Void = { [weak alert] remember in
+            let entered = (alert?.textFields?.first?.text ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if entered.isEmpty {
                 onGiveUp()   // empty == cancel (viewer.py)
@@ -401,22 +401,29 @@ final class ViewController: UIViewController {
     // MARK: - Traces
 
     private func requestTraces() {
+        if !boardOpen {
+            postError("Open a board first.")
+            return
+        }
         if tracesInFlight { return }
         tracesInFlight = true
         postStatus("Building topology…")
         PythonRuntime.shared.call("load_traces") { [weak self] raw in
             guard let self else { return }
             self.tracesInFlight = false
-            // Always forward — bv.onTraces clears its pending state on both
-            // success and {ok:false}.
-            self.runJs("window.bv && bv.onTraces(\(raw));")
-            if let data = raw.data(using: .utf8),
-               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-               json["ok"] as? Bool != true {
-                let reason = json["reason"] as? String ?? "unknown error"
-                self.postError("Could not load traces: \(reason)")
+            defer { self.postStatus("") }
+            guard let data = raw.data(using: .utf8),
+                  let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                self.postError("Trace build failed: malformed exporter result")
+                return
             }
-            self.postStatus("")
+            if json["ok"] as? Bool == true {
+                self.runJs("window.bv && bv.onTraces(\(raw));")
+            } else {
+                let reason = json["reason"] as? String
+                    ?? (json["error"] as? String ?? "unknown error")
+                self.postError("Trace build failed: \(reason)")
+            }
         }
     }
 
