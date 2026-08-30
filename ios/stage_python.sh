@@ -62,7 +62,7 @@ echo "Staged ${#PYTHON_MODULES[@]} Python modules into app/"
 
 # numpy: pick the wheel matching the platform being built. fetch_deps.sh
 # populates these; EFFECTIVE_PLATFORM_NAME is "-iphoneos"/"-iphonesimulator".
-WHEEL_DIR="$PROJECT_DIR/vendor/app_packages${EFFECTIVE_PLATFORM_NAME}"
+WHEEL_DIR="$PROJECT_DIR/vendor/app_packages.${EFFECTIVE_PLATFORM_NAME#-}"
 if [ ! -d "$WHEEL_DIR/numpy" ]; then
     echo "error: stage_python.sh: $WHEEL_DIR is missing — run ios/fetch_deps.sh first." >&2
     exit 1
