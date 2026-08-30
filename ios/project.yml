@@ -1,0 +1,101 @@
+# XcodeGen project definition for the iOS shell (`xcodegen generate`, then
+# build ios/Boardview.xcodeproj). Mirrors android/app/build.gradle.kts:
+# same app id, versionName/versionCode, and the same three-component
+# architecture (shell + shared JS renderer + embedded Python parser core).
+# Run ios/fetch_deps.sh once before the first build.
+name: Boardview
+options:
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "15.0"
+settings:
+  base:
+    DEVELOPMENT_TEAM: TBF6XLG285
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "1.1.0"
+    CURRENT_PROJECT_VERSION: "5"
+    SWIFT_VERSION: "5.9"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    SUPPORTS_MACCATALYST: false
+targets:
+  Boardview:
+    type: application
+    platform: iOS
+    sources:
+      - path: Boardview
+    dependencies:
+      - framework: vendor/Python.xcframework
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.thermetery.boardview
+        PRODUCT_NAME: Boardview
+        SWIFT_OBJC_BRIDGING_HEADER: Boardview/Sources/Boardview-Bridging-Header.h
+        INFOPLIST_KEY_CFBundleDisplayName: Boardview
+    info:
+      path: Boardview/Info.plist
+      properties:
+        CFBundleDisplayName: Boardview
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # iPad multitasking support requires all four orientations.
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: false
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: PCB boardview file
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - com.thermetery.boardview.tvw
+              - com.thermetery.boardview.fz
+              - com.thermetery.boardview.xzzpcb
+              - com.thermetery.boardview.gencad
+              - com.thermetery.boardview.brd
+              - com.thermetery.boardview.asc
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: com.thermetery.boardview.tvw
+            UTTypeDescription: Teboview boardview
+            UTTypeConformsTo: [public.data]
+            UTTypeTagSpecification: {public.filename-extension: [tvw]}
+          - UTTypeIdentifier: com.thermetery.boardview.fz
+            UTTypeDescription: Allegro Extracta boardview
+            UTTypeConformsTo: [public.data]
+            UTTypeTagSpecification: {public.filename-extension: [fz]}
+          - UTTypeIdentifier: com.thermetery.boardview.xzzpcb
+            UTTypeDescription: XZZPCB boardview
+            UTTypeConformsTo: [public.data]
+            UTTypeTagSpecification: {public.filename-extension: [pcb]}
+          - UTTypeIdentifier: com.thermetery.boardview.gencad
+            UTTypeDescription: GENCAD boardview
+            UTTypeConformsTo: [public.data]
+            UTTypeTagSpecification: {public.filename-extension: [cad]}
+          - UTTypeIdentifier: com.thermetery.boardview.brd
+            UTTypeDescription: OpenBoardView ASCII boardview
+            UTTypeConformsTo: [public.data]
+            UTTypeTagSpecification: {public.filename-extension: [brd, brd2, bv]}
+          - UTTypeIdentifier: com.thermetery.boardview.asc
+            UTTypeDescription: eM-Test Expert ICT member file
+            UTTypeConformsTo: [public.data]
+            UTTypeTagSpecification: {public.filename-extension: [asc]}
+    postBuildScripts:
+      - name: Stage + embed Python
+        script: "\"$PROJECT_DIR/stage_python.sh\"\n"
+        shell: /bin/bash
+        basedOnDependencyAnalysis: false
+      - name: Stage web assets
+        script: "\"$PROJECT_DIR/stage_assets.sh\"\n"
+        shell: /bin/bash
+        basedOnDependencyAnalysis: false
+      - name: Build native kernels
+        script: "\"$PROJECT_DIR/build_kernels.sh\"\n"
+        shell: /bin/bash
+        basedOnDependencyAnalysis: false

@@ -57,6 +57,11 @@ REQUIRED_PIP_DISTRIBUTIONS: Tuple[str, ...] = (
 # libcrypto_python.so / libsqlite3_python.so); re-verify when bumping the
 # Chaquopy plugin version.
 STATIC_SECTIONS: Tuple[Tuple[str, str], ...] = (
+    # numpy's dist-info LICENSE.txt covers numpy itself but not the RNG
+    # algorithm licenses bundled under numpy/random/ (MT19937, PCG, etc.);
+    # the shared copy under LICENSES/ matches the pinned numpy version.
+    ("numpy.random bundled algorithm licenses",
+     "LICENSES/numpy-random-licenses.md"),
     ("CPython 3.13 (embedded via Chaquopy) - PSF License 2.0",
      "LICENSES/android/CPython-PSF-2.0.txt"),
     ("bzip2/libbzip2 1.0.8 (statically linked into CPython's _bz2 module) - "
