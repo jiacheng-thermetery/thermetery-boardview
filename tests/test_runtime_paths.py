@@ -33,6 +33,18 @@ class RuntimePathTests(unittest.TestCase):
                     f"sys.platform={platform}",
                 )
 
+    def test_native_lib_candidates_ios_framework_shape(self):
+        # On iOS the BOARDVIEW_NATIVE_DIR override is searched in App Store
+        # framework shape first (<dir>/<base>.framework/<base>), then the
+        # plain dylib names.
+        with mock.patch.object(runtime_paths.sys, "platform", "ios"), \
+             mock.patch.dict(os.environ, {runtime_paths.NATIVE_DIR_ENV: "/fw"}):
+            candidates = runtime_paths.native_lib_candidates(
+                Path("/nonexistent"), "tvw_native")
+        self.assertEqual(
+            candidates[0], str(Path("/fw/tvw_native.framework/tvw_native")))
+        self.assertEqual(candidates[1], str(Path("/fw/tvw_native.dylib")))
+
     def test_explicit_data_root_has_precedence(self):
         # Platform-neutral absolute path: "C:/..." is not absolute on
         # POSIX (managed_data_dir would CWD-resolve it), which made this

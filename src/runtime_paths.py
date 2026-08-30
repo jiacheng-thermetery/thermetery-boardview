@@ -170,6 +170,11 @@ def native_lib_candidates(anchor_dir: Path, base_name: str) -> List[str]:
     candidates: List[str] = []
     env_dir = os.environ.get(NATIVE_DIR_ENV)
     if env_dir:
+        if sys.platform == "ios":
+            # App Store packaging requires every dynamic library to live in
+            # its own .framework bundle, so on iOS the override directory is
+            # searched in that shape first (<dir>/<base>.framework/<base>).
+            candidates.append(str(Path(env_dir) / f"{base_name}.framework" / base_name))
         candidates += [str(Path(env_dir) / n) for n in names]
     candidates += [str(here / NATIVE_SUBDIR / n) for n in names
                    if (here / NATIVE_SUBDIR / n).exists()]
