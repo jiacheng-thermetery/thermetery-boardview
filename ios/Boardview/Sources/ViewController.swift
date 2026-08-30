@@ -148,7 +148,12 @@ final class ViewController: UIViewController {
     /// LSSupportsOpeningDocumentsInPlace=false iOS hands us an app-local
     /// inbox copy; in-place URLs (e.g. drag & drop) need the security scope.
     func handleExternalOpen(url: URL, openInPlace: Bool) {
-        handleIncomingFile(url: url, securityScoped: openInPlace, deleteOriginal: !openInPlace)
+        // Clean up only transient system-made copies (Documents/Inbox, tmp) —
+        // never a file the user owns, e.g. our own Documents via file sharing.
+        let path = url.standardizedFileURL.path
+        let transient = path.contains("/Documents/Inbox/") || path.contains("/tmp/")
+        handleIncomingFile(url: url, securityScoped: openInPlace,
+                           deleteOriginal: !openInPlace && transient)
     }
 
     private func sanitizeFileName(_ name: String) -> String {
